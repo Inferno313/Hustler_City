@@ -1,0 +1,353 @@
+-- ============================================================
+--  HUSTLE CITY: Casino Empire
+--  Script: DataStoreManager (ServerScriptService)
+--  Handles: Saving & Loading ALL player data
+-- ============================================================
+
+local DataStoreService = game:GetService("DataStoreService")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local PlayerDataStore = DataStoreService:GetDataStore("HustleCityData_v1")
+
+-- ============================================================
+-- DEFAULT PLAYER DATA TEMPLATE
+-- ============================================================
+local function getDefaultData()
+	return {
+		-- Economy
+		Cash = 100,                  -- Starting cash
+		TotalEarned = 0,
+		TotalWagered = 0,
+		TotalWon = 0,
+
+		-- Progress
+		Level = 1,
+		XP = 0,
+		StreetRep = 0,
+
+		-- Performance Stats
+		TotalPerformances = 0,
+		BestCombo = 0,
+		PerformancesUnlocked = { "Guitar" }, -- Unlocked acts
+
+		-- Casino Ownership
+		OwnsCasino = false,
+		CasinoName = "My Casino",
+		CasinoLevel = 0,
+		CasinoXP = 0,
+		CasinoUpgrades = {
+			GrandEntrance = 0,
+			NeonLights = 0,
+			LiveMusicStage = 0,
+			VIPLounge = 0,
+			ExtraSlots = 0,
+			ExtraBlackjackTables = 0,
+		},
+		CasinoTotalRevenue = 0,
+
+		-- Gambling Stats
+		SlotsWins = 0,
+		BlackjackWins = 0,
+		RouletteWins = 0,
+		CoinFlipWins = 0,
+		BiggestWin = 0,
+
+		-- Daily Data (resets each day)
+		LastLogin = os.time(),
+		DailyPerformances = 0,
+		DailyGamesWon = 0,
+		DailyEarned = 0,
+		DailyStreak = 0,
+	}
+end
+
+-- ============================================================
+-- NET WORTH LEVEL THRESHOLDS
+-- Level is determined by total net worth (Cash + Casino value)
+-- ============================================================
+local LEVEL_TITLES = {
+	[1]  = { Title = "Broke Bum",        Min = 0          },
+	[2]  = { Title = "Street Rookie",    Min = 500        },
+	[3]  = { Title = "Corner Hustler",   Min = 2000       },
+	[4]  = { Title = "City Grinder",     Min = 5000       },
+	[5]  = { Title = "Street Legend",    Min = 15000      },
+	[6]  = { Title = "High Roller",      Min = 35000      },
+	[7]  = { Title = "Casino Prospect",  Min = 50000      },
+	[8]  = { Title = "Casino Owner",     Min = 100000     },
+	[9]  = { Title = "Casino Boss",      Min = 250000     },
+	[10] = { Title = "City Mogul",       Min = 500000     },
+	[11] = { Title = "Empire Builder",   Min = 1000000    },
+	[12] = { Title = "Casino Tycoon",    Min = 2500000    },
+	[13] = { Title = "The House",        Min = 5000000    },
+	[14] = { Title = "Hustle King",      Min = 10000000   },
+	[15] = { Title = "Casino Emperor",   Min = 25000000   },
+}
+
+local function getNetWorth(data)
+	local worth = data.Cash or 0
+	-- Add casino value if owned
+	if data.OwnsCasino then
+		worth = worth + (data.CasinoTotalRevenue or 0)
+		-- Add upgrade investment value
+		local upgradeTotal = 0
+		if data.CasinoUpgrades then
+			local costs = {2500,6000,12000,25000,50000}
+			for _, level in pairs(data.CasinoUpgrades) do
+				for i = 1, level do
+					upgradeTotal = upgradeTotal + (costs[i] or 0)
+				end
+			end
+		end
+		worth = worth + upgradeTotal
+	end
+	return worth
+end
+
+local function getLevelFromNetWorth(data)
+	local worth = getNetWorth(data)
+	local level = 1
+	for lvl = #LEVEL_TITLES, 1, -1 do
+		if worth >= LEVEL_TITLES[lvl].Min then
+			level = lvl
+			break
+		end
+	end
+	return level
+end
+
+local function getTitleForLevel(level)
+	return (LEVEL_TITLES[level] and LEVEL_TITLES[level].Title) or "Casino Emperor"
+end
+
+local function getNextLevelInfo(data)
+	local currentLevel = getLevelFromNetWorth(data)
+	local nextLevel = currentLevel + 1
+	local nextInfo = LEVEL_TITLES[nextLevel]
+	if not nextInfo then
+		return nil, 0, 0 -- Max level
+	end
+	local worth = getNetWorth(data)
+	local needed = nextInfo.Min - worth
+	return nextLevel, nextInfo.Min, needed
+end
+
+-- ============================================================
+-- IN-MEMORY PLAYER CACHE
+-- ============================================================
+local PlayerData = {}
+
+-- ============================================================
+-- LOAD PLAYER DATA
+-- ============================================================
+local function LoadData(player)
+	local userId = tostring(player.UserId)
+	local success, data = pcall(function()
+		return PlayerDataStore:GetAsync(userId)
+	end)
+
+	if success and data then
+		-- Merge with defaults (handles new fields added in updates)
+		local defaults = getDefaultData()
+		for key, value in pairs(defaults) do
+			if data[key] == nil then
+				data[key] = value
+			end
+		end
+		-- Deep merge for nested tables (upgrades)
+		if data.CasinoUpgrades then
+			for key, value in pairs(defaults.CasinoUpgrades) do
+				if data.CasinoUpgrades[key] == nil then
+					data.CasinoUpgrades[key] = value
+				end
+			end
+		end
+		PlayerData[player] = data
+		print("[HustleCity] ✅ Loaded data for " .. player.Name)
+	else
+		-- New player
+		PlayerData[player] = getDefaultData()
+		print("[HustleCity] 🆕 New player: " .. player.Name)
+	end
+
+	-- Check if it's a new day for this player
+	local lastLogin = PlayerData[player].LastLogin or 0
+	local now = os.time()
+	local ONE_DAY = 86400
+	if (now - lastLogin) >= ONE_DAY then
+		PlayerData[player].DailyPerformances = 0
+		PlayerData[player].DailyGamesWon = 0
+		PlayerData[player].DailyEarned = 0
+		PlayerData[player].DailyStreak = PlayerData[player].DailyStreak + 1
+		print("[HustleCity] 📅 New day for " .. player.Name .. " (Streak: " .. PlayerData[player].DailyStreak .. ")")
+	end
+	PlayerData[player].LastLogin = now
+end
+
+-- ============================================================
+-- SAVE PLAYER DATA
+-- ============================================================
+local function SaveData(player)
+	if not PlayerData[player] then return end
+
+	local userId = tostring(player.UserId)
+	local data = PlayerData[player]
+
+	local success, err = pcall(function()
+		PlayerDataStore:SetAsync(userId, data)
+	end)
+
+	if success then
+		print("[HustleCity] 💾 Saved data for " .. player.Name)
+	else
+		warn("[HustleCity] ❌ Failed to save " .. player.Name .. ": " .. tostring(err))
+	end
+end
+
+-- ============================================================
+-- PUBLIC API — used by other scripts
+-- ============================================================
+local DataManager = {}
+
+function DataManager:GetData(player)
+	return PlayerData[player]
+end
+
+function DataManager:AddCash(player, amount)
+	local data = PlayerData[player]
+	if not data then return end
+	data.Cash = data.Cash + amount
+	data.TotalEarned = data.TotalEarned + math.max(0, amount)
+	data.DailyEarned = data.DailyEarned + math.max(0, amount)
+end
+
+function DataManager:CheckLevelUp(player)
+	local data = PlayerData[player]
+	if not data then return end
+	local oldLevel = data.Level or 1
+	local newLevel = getLevelFromNetWorth(data)
+	if newLevel > oldLevel then
+		data.Level = newLevel
+		local title = getTitleForLevel(newLevel)
+		print("[HustleCity] ⭐ " .. player.Name .. " reached Level " .. newLevel .. ": " .. title)
+		game:GetService("ReplicatedStorage").Events.LevelUp:FireClient(player, newLevel, title)
+	end
+	data.Level = newLevel
+end
+
+function DataManager:GetNetWorth(player)
+	local data = PlayerData[player]
+	if not data then return 0 end
+	return getNetWorth(data)
+end
+
+function DataManager:GetLevelInfo(player)
+	local data = PlayerData[player]
+	if not data then return 1, "Broke Bum", 0, 500, 500 end
+	local level = getLevelFromNetWorth(data)
+	local title = getTitleForLevel(level)
+	local nextLevel, nextMin, needed = getNextLevelInfo(data)
+	return level, title, getNetWorth(data), nextMin or 0, needed or 0
+end
+
+function DataManager:AddStreetRep(player, amount)
+	local data = PlayerData[player]
+	if not data then return end
+	data.StreetRep = data.StreetRep + amount
+end
+
+function DataManager:RecordPerformance(player, combo)
+	local data = PlayerData[player]
+	if not data then return end
+	data.TotalPerformances = data.TotalPerformances + 1
+	data.DailyPerformances = data.DailyPerformances + 1
+	if combo > data.BestCombo then
+		data.BestCombo = combo
+	end
+end
+
+function DataManager:RecordGamble(player, wagered, won, gameType)
+	local data = PlayerData[player]
+	if not data then return end
+	data.TotalWagered = data.TotalWagered + wagered
+	if won > 0 then
+		data.TotalWon = data.TotalWon + won
+		data.DailyGamesWon = data.DailyGamesWon + 1
+		if won > data.BiggestWin then
+			data.BiggestWin = won
+		end
+		-- Track per-game wins
+		local winKey = gameType .. "Wins"
+		if data[winKey] then
+			data[winKey] = data[winKey] + 1
+		end
+	end
+end
+
+function DataManager:OpenCasino(player, casinoName)
+	local data = PlayerData[player]
+	if not data then return false end
+	if data.OwnsCasino then return false end
+	local CASINO_COST = 50000
+	if data.Cash < CASINO_COST then return false end
+	data.Cash = data.Cash - CASINO_COST
+	data.OwnsCasino = true
+	data.CasinoName = casinoName or (player.Name .. "'s Casino")
+	data.CasinoLevel = 1
+	print("[HustleCity] 🏛️ " .. player.Name .. " opened: " .. data.CasinoName)
+	return true
+end
+
+function DataManager:UpgradeCasino(player, upgradeKey, cost)
+	local data = PlayerData[player]
+	if not data or not data.OwnsCasino then return false end
+	if data.Cash < cost then return false end
+	if not data.CasinoUpgrades[upgradeKey] then return false end
+	data.Cash = data.Cash - cost
+	data.CasinoUpgrades[upgradeKey] = data.CasinoUpgrades[upgradeKey] + 1
+	return true
+end
+
+function DataManager:AddCasinoRevenue(player, amount)
+	local data = PlayerData[player]
+	if not data or not data.OwnsCasino then return end
+	data.CasinoTotalRevenue = data.CasinoTotalRevenue + amount
+	data.Cash = data.Cash + amount
+end
+
+-- ============================================================
+-- AUTO-SAVE every 60 seconds
+-- ============================================================
+local autoSaveTimer = 0
+RunService.Heartbeat:Connect(function(dt)
+	autoSaveTimer = autoSaveTimer + dt
+	if autoSaveTimer >= 60 then
+		autoSaveTimer = 0
+		for player, _ in pairs(PlayerData) do
+			if player.Parent then -- still in game
+				SaveData(player)
+			end
+		end
+	end
+end)
+
+-- ============================================================
+-- PLAYER JOINED / LEFT
+-- ============================================================
+Players.PlayerAdded:Connect(function(player)
+	LoadData(player)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	SaveData(player)
+	PlayerData[player] = nil
+end)
+
+-- Handle server shutdown gracefully
+game:BindToClose(function()
+	for player, _ in pairs(PlayerData) do
+		SaveData(player)
+	end
+end)
+
+return DataManager
