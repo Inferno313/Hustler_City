@@ -1,0 +1,168 @@
+-- ServerScriptService > LockServer
+
+local Players          = game:GetService("Players")
+local RS               = game:GetService("ReplicatedStorage")
+local Workspace        = game:GetService("Workspace")
+local Debris           = game:GetService("Debris")
+local ServerScriptService = game:GetService("ServerScriptService")
+local DataManager      = require(ServerScriptService:WaitForChild("DataStoreManager"))
+
+-- ── Events ───────────────────────────────────────────────────────────────────
+local function getOrCreate(name)
+	local e = RS:FindFirstChild(name)
+	if e then return e end
+	e = Instance.new("RemoteEvent"); e.Name = name; e.Parent = RS
+	return e
+end
+
+local openEvent   = getOrCreate("MinigameOpen")    -- Server→Client: speed (number)
+local resultEvent = getOrCreate("MinigameResult")  -- Client→Server: true=hit, false=miss
+local stopEvent   = getOrCreate("MinigameStop")    -- Client→Server: voluntary stop → payout
+
+-- ── Config ────────────────────────────────────────────────────────────────────
+local SPOT_SPEEDS = {
+	PerformanceSpot_1 = 150,
+	PerformanceSpot_2 = 225,
+	PerformanceSpot_3 = 320,
+}
+local SPEED_INCREMENT = 40
+local MAX_SPEED       = 800
+
+-- Cash per hit scales with speed: ~$25 at 150, ~$37 at 225, ~$53 at 320, ~$100 at 600
+local function calcReward(speed)
+	return math.max(25, math.floor(speed / 6))
+end
+
+-- ── State ─────────────────────────────────────────────────────────────────────
+local activeSpots = {}  -- [player] = { speed, successCount, pendingCash }
+local cooldowns   = {}
+
+-- ── Give cash ─────────────────────────────────────────────────────────────────
+local function giveCash(player, amount)
+	local data = DataManager:GetData(player)
+	if data then
+		data.Cash     = data.Cash     + amount
+		data.NetWorth = (data.NetWorth or 0) + amount
+		DataManager:CheckLevelUp(player)
+		print(string.format("[PopALock] 💰 %s paid $%d  |  Cash = $%d", player.Name, amount, data.Cash))
+	else
+		warn("[PopALock] DataManager returned nil for " .. player.Name)
+	end
+end
+
+-- ── Ragdoll ───────────────────────────────────────────────────────────────────
+local function ragdollPlayer(player)
+	local char = player.Character
+	if not char then return end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if hum then hum.PlatformStand = true end
+	for _, j in ipairs(char:GetDescendants()) do
+		if j:IsA("Motor6D") then
+			local a0 = Instance.new("Attachment"); a0.Parent = j.Part0
+			local a1 = Instance.new("Attachment"); a1.Parent = j.Part1
+			local s  = Instance.new("BallSocketConstraint")
+			s.Attachment0 = a0; s.Attachment1 = a1; s.Parent = j.Parent
+			j.Enabled = false
+		end
+	end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if hrp then
+		local bv = Instance.new("BodyVelocity")
+		bv.Velocity = Vector3.new(math.random(-15,15), 12, math.random(-15,15))
+		bv.MaxForce = Vector3.new(1e4,1e4,1e4); bv.Parent = hrp
+		Debris:AddItem(bv, 0.35)
+	end
+	task.delay(3, function()
+		if not char or not char.Parent then return end
+		if hum then hum.PlatformStand = false end
+		for _, s in ipairs(char:GetDescendants()) do
+			if s:IsA("BallSocketConstraint") then s:Destroy() end
+		end
+		for _, j in ipairs(char:GetDescendants()) do
+			if j:IsA("Motor6D") then j.Enabled = true end
+		end
+	end)
+end
+
+local function anchorPlayer(player, on)
+	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	if hrp then hrp.Anchored = on end
+end
+
+local function releaseSpot(player, doRagdoll)
+	if not activeSpots[player] then return end
+	anchorPlayer(player, false)
+	activeSpots[player] = nil
+	if doRagdoll then ragdollPlayer(player) end
+	task.delay(2.5, function() cooldowns[player] = nil end)
+end
+
+local function ensurePrompt(spot)
+	local p = spot:FindFirstChildOfClass("ProximityPrompt")
+	if p then return p end
+	p = Instance.new("ProximityPrompt")
+	p.ActionText = "Perform"; p.ObjectText = "Street Performance"
+	p.KeyboardKeyCode = Enum.KeyCode.E
+	p.HoldDuration = 0; p.MaxActivationDistance = 8; p.Parent = spot
+	return p
+end
+
+-- ── Scan spots ────────────────────────────────────────────────────────────────
+local gameSpots = Workspace:WaitForChild("GameSpots", 10)
+if not gameSpots then warn("[PopALock] ❌ GameSpots not found"); return end
+
+print("[PopALock] 🎮 LockServer loaded!")
+
+for _, spot in ipairs(gameSpots:GetChildren()) do
+	local baseSpeed = SPOT_SPEEDS[spot.Name]
+	if spot:IsA("BasePart") and baseSpeed then
+		local prompt = ensurePrompt(spot)
+		print(string.format("[PopALock] ✅ %s ready | speed: %d", spot.Name, baseSpeed))
+		prompt.Triggered:Connect(function(player)
+			if activeSpots[player] or cooldowns[player] then return end
+			cooldowns[player] = true
+			activeSpots[player] = { speed = baseSpeed, successCount = 0, pendingCash = 0 }
+			anchorPlayer(player, true)
+			print(string.format("[PopALock] 🎭 %s → %s speed: %d", player.Name, spot.Name, baseSpeed))
+			openEvent:FireClient(player, baseSpeed)
+		end)
+	end
+end
+
+-- ── Hit / miss ────────────────────────────────────────────────────────────────
+resultEvent.OnServerEvent:Connect(function(player, hit)
+	local data = activeSpots[player]
+	if not data then return end
+
+	if hit == true then
+		-- Accumulate reward at current speed — paid out only on voluntary stop
+		local reward = calcReward(data.speed)
+		data.pendingCash    = data.pendingCash + reward
+		data.successCount  += 1
+		data.speed          = math.min(data.speed + SPEED_INCREMENT, MAX_SPEED)
+		openEvent:FireClient(player, data.speed)
+		print(string.format("[PopALock] 🎯 %s hit | +$%d pending (total $%d) | speed now %d",
+			player.Name, reward, data.pendingCash, data.speed))
+
+	elseif hit == false then
+		-- Miss — forfeit everything, ragdoll
+		print(string.format("[PopALock] ❌ %s missed | forfeited $%d", player.Name, data.pendingCash))
+		releaseSpot(player, true)
+	end
+end)
+
+-- ── Voluntary stop — pay out ──────────────────────────────────────────────────
+stopEvent.OnServerEvent:Connect(function(player)
+	local data = activeSpots[player]
+	if not data then return end
+	local payout = data.pendingCash
+	print(string.format("[PopALock] 🛑 %s stopped | paying $%d", player.Name, payout))
+	releaseSpot(player, false)
+	if payout > 0 then giveCash(player, payout) end
+end)
+
+-- ── Cleanup ───────────────────────────────────────────────────────────────────
+Players.PlayerRemoving:Connect(function(player)
+	activeSpots[player] = nil
+	cooldowns[player]   = nil
+end)
