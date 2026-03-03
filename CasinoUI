@@ -1,0 +1,946 @@
+-- ============================================================
+--  HUSTLE CITY: Casino Empire
+--  Script: CasinoUI (LocalScript in StarterGui)
+--  Screens: Slots, Blackjack, Roulette, Coin Flip
+-- ============================================================
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+
+local player = Players.LocalPlayer
+local Events = ReplicatedStorage:WaitForChild("Events")
+
+local PlaySlots       = Events:WaitForChild("PlaySlots")
+local PlayBlackjack   = Events:WaitForChild("PlayBlackjack")
+local PlayRoulette    = Events:WaitForChild("PlayRoulette")
+local PlayCoinFlip    = Events:WaitForChild("PlayCoinFlip")
+local OpenCasinoEntrance = Events:WaitForChild("OpenCasinoEntrance")
+
+-- ============================================================
+-- HELPERS
+-- ============================================================
+local function corner(p, r) Instance.new("UICorner", p).CornerRadius = UDim.new(0, r or 12) end
+local function stroke(p, c, t)
+	local s = Instance.new("UIStroke", p); s.Color = c; s.Thickness = t or 2
+	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+end
+local function formatCash(n)
+	if n >= 1000000 then return string.format("$%.2fM", n/1000000)
+	elseif n >= 1000 then return string.format("$%.1fK", n/1000)
+	else return "$"..math.floor(n) end
+end
+
+-- ============================================================
+-- ROOT GUI
+-- ============================================================
+local gui = Instance.new("ScreenGui")
+gui.Name = "CasinoUI"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Enabled = false
+gui.Parent = player.PlayerGui
+
+local function openGUI()
+	gui.Enabled = true
+end
+
+local function closeGUI()
+	gui.Enabled = false
+end
+
+-- Dim overlay
+local overlay = Instance.new("Frame", gui)
+overlay.Size = UDim2.new(1, 0, 1, 0)
+overlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+overlay.BackgroundTransparency = 0.5
+overlay.BorderSizePixel = 0
+overlay.ZIndex = 10
+
+-- ============================================================
+-- MAIN CASINO MENU
+-- ============================================================
+local menu = Instance.new("Frame", gui)
+menu.Name = "Menu"
+menu.Size = UDim2.new(0, 520, 0, 400)
+menu.Position = UDim2.new(0.5, -260, 0.5, -200)
+menu.BackgroundColor3 = Color3.fromRGB(8, 4, 18)
+menu.BorderSizePixel = 0
+menu.ZIndex = 20
+corner(menu, 20)
+stroke(menu, Color3.fromRGB(180, 60, 255), 2)
+local menuGrad = Instance.new("UIGradient", menu)
+menuGrad.Color = ColorSequence.new(Color3.fromRGB(22, 8, 42), Color3.fromRGB(8, 4, 18))
+menuGrad.Rotation = 135
+
+local menuTitle = Instance.new("TextLabel", menu)
+menuTitle.Size = UDim2.new(1, -60, 0, 56)
+menuTitle.Position = UDim2.new(0, 20, 0, 0)
+menuTitle.BackgroundTransparency = 1
+menuTitle.Text = "🎰 Lucky Star Casino"
+menuTitle.Font = Enum.Font.GothamBold
+menuTitle.TextSize = 26
+menuTitle.TextColor3 = Color3.fromRGB(255, 210, 50)
+menuTitle.TextXAlignment = Enum.TextXAlignment.Left
+menuTitle.ZIndex = 21
+
+local menuClose = Instance.new("TextButton", menu)
+menuClose.Size = UDim2.new(0, 36, 0, 36)
+menuClose.Position = UDim2.new(1, -44, 0, 10)
+menuClose.BackgroundColor3 = Color3.fromRGB(40, 15, 60)
+menuClose.BorderSizePixel = 0
+menuClose.Text = "✕"
+menuClose.Font = Enum.Font.GothamBold
+menuClose.TextSize = 16
+menuClose.TextColor3 = Color3.fromRGB(200, 150, 255)
+menuClose.ZIndex = 22
+corner(menuClose, 10)
+menuClose.MouseButton1Click:Connect(function()
+	closeGUI()
+end)
+
+-- Balance display
+local balanceLabel = Instance.new("TextLabel", menu)
+balanceLabel.Name = "Balance"
+balanceLabel.Size = UDim2.new(1, -40, 0, 26)
+balanceLabel.Position = UDim2.new(0, 20, 0, 54)
+balanceLabel.BackgroundTransparency = 1
+balanceLabel.Text = "💰 Balance: $100"
+balanceLabel.Font = Enum.Font.GothamBold
+balanceLabel.TextSize = 16
+balanceLabel.TextColor3 = Color3.fromRGB(255, 215, 50)
+balanceLabel.TextXAlignment = Enum.TextXAlignment.Left
+balanceLabel.ZIndex = 21
+
+-- Game buttons grid
+local GAMES = {
+	{ name = "Slots",     emoji = "🎰", payout = "Up to 50x",  min = "$25",   color = Color3.fromRGB(140, 60, 220), game = "slots"    },
+	{ name = "Blackjack", emoji = "🃏", payout = "2x / 2.5x",  min = "$100",  color = Color3.fromRGB(30, 160, 80),  game = "blackjack" },
+	{ name = "Roulette",  emoji = "🎡", payout = "Up to 35x",  min = "$50",   color = Color3.fromRGB(200, 50, 90),  game = "roulette"  },
+	{ name = "Coin Flip", emoji = "🪙", payout = "2x / 5x",    min = "$500",  color = Color3.fromRGB(200, 170, 20), game = "coinflip"  },
+}
+
+local gridFrame = Instance.new("Frame", menu)
+gridFrame.Size = UDim2.new(1, -40, 0, 280)
+gridFrame.Position = UDim2.new(0, 20, 0, 92)
+gridFrame.BackgroundTransparency = 1
+gridFrame.ZIndex = 21
+
+local gridLayout = Instance.new("UIGridLayout", gridFrame)
+gridLayout.CellSize = UDim2.new(0.48, 0, 0, 128)
+gridLayout.CellPadding = UDim2.new(0.04, 0, 0, 12)
+
+local screens = {}
+
+for _, g in ipairs(GAMES) do
+	local btn = Instance.new("TextButton", gridFrame)
+	btn.BackgroundColor3 = Color3.fromRGB(12, 6, 24)
+	btn.BorderSizePixel = 0
+	btn.Text = ""
+	btn.ZIndex = 22
+	corner(btn, 14)
+	stroke(btn, g.color, 2)
+
+	local eLbl = Instance.new("TextLabel", btn)
+	eLbl.Size = UDim2.new(1, 0, 0, 52)
+	eLbl.Position = UDim2.new(0, 0, 0, 8)
+	eLbl.BackgroundTransparency = 1
+	eLbl.Text = g.emoji
+	eLbl.TextSize = 34
+	eLbl.Font = Enum.Font.GothamBold
+	eLbl.ZIndex = 23
+
+	local nLbl = Instance.new("TextLabel", btn)
+	nLbl.Size = UDim2.new(1, -8, 0, 20)
+	nLbl.Position = UDim2.new(0, 4, 0, 60)
+	nLbl.BackgroundTransparency = 1
+	nLbl.Text = g.name
+	nLbl.Font = Enum.Font.GothamBold
+	nLbl.TextSize = 15
+	nLbl.TextColor3 = Color3.fromRGB(240, 235, 255)
+	nLbl.ZIndex = 23
+
+	local pLbl = Instance.new("TextLabel", btn)
+	pLbl.Size = UDim2.new(1, -8, 0, 16)
+	pLbl.Position = UDim2.new(0, 4, 0, 82)
+	pLbl.BackgroundTransparency = 1
+	pLbl.Text = "Payout: " .. g.payout
+	pLbl.Font = Enum.Font.Gotham
+	pLbl.TextSize = 11
+	pLbl.TextColor3 = Color3.fromRGB(180, 150, 255)
+	pLbl.ZIndex = 23
+
+	local mLbl = Instance.new("TextLabel", btn)
+	mLbl.Size = UDim2.new(1, -8, 0, 14)
+	mLbl.Position = UDim2.new(0, 4, 0, 100)
+	mLbl.BackgroundTransparency = 1
+	mLbl.Text = "Min: " .. g.min
+	mLbl.Font = Enum.Font.Gotham
+	mLbl.TextSize = 10
+	mLbl.TextColor3 = Color3.fromRGB(255, 200, 50)
+	mLbl.ZIndex = 23
+
+	local gameId = g.game
+	btn.MouseButton1Click:Connect(function()
+		menu.Visible = false
+		if screens[gameId] then
+			screens[gameId].Visible = true
+		end
+	end)
+end
+
+-- ============================================================
+-- HELPER: Back button for sub-screens
+-- ============================================================
+local function makeBackBtn(parent)
+	local btn = Instance.new("TextButton", parent)
+	btn.Size = UDim2.new(0, 100, 0, 30)
+	btn.Position = UDim2.new(0, 12, 0, 10)
+	btn.BackgroundColor3 = Color3.fromRGB(30, 15, 50)
+	btn.BorderSizePixel = 0
+	btn.Text = "← Back"
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 13
+	btn.TextColor3 = Color3.fromRGB(180, 140, 255)
+	btn.ZIndex = parent.ZIndex + 1
+	corner(btn, 8)
+	btn.MouseButton1Click:Connect(function()
+		parent.Visible = false
+		menu.Visible = true
+	end)
+	return btn
+end
+
+-- ============================================================
+-- BET INPUT HELPER
+-- ============================================================
+local function makeBetRow(parent, yPos, minBet)
+	local frame = Instance.new("Frame", parent)
+	frame.Size = UDim2.new(1, -40, 0, 44)
+	frame.Position = UDim2.new(0, 20, 0, yPos)
+	frame.BackgroundColor3 = Color3.fromRGB(14, 7, 28)
+	frame.BorderSizePixel = 0
+	frame.ZIndex = parent.ZIndex + 1
+	corner(frame, 10)
+	stroke(frame, Color3.fromRGB(80, 40, 120), 1)
+
+	local betLbl = Instance.new("TextLabel", frame)
+	betLbl.Size = UDim2.new(0, 50, 1, 0)
+	betLbl.BackgroundTransparency = 1
+	betLbl.Text = "BET:"
+	betLbl.Font = Enum.Font.GothamBold
+	betLbl.TextSize = 13
+	betLbl.TextColor3 = Color3.fromRGB(180, 150, 220)
+	betLbl.ZIndex = frame.ZIndex + 1
+
+	local betBox = Instance.new("TextBox", frame)
+	betBox.Name = "BetBox"
+	betBox.Size = UDim2.new(1, -120, 0.8, 0)
+	betBox.Position = UDim2.new(0, 54, 0.1, 0)
+	betBox.BackgroundColor3 = Color3.fromRGB(20, 10, 36)
+	betBox.BorderSizePixel = 0
+	betBox.Text = tostring(minBet)
+	betBox.Font = Enum.Font.GothamBold
+	betBox.TextSize = 16
+	betBox.TextColor3 = Color3.fromRGB(255, 215, 50)
+	betBox.PlaceholderText = "Enter bet"
+	betBox.ZIndex = frame.ZIndex + 1
+	corner(betBox, 8)
+
+	-- Quick bet buttons
+	local quickBets = {minBet, minBet*5, minBet*20}
+	for i, amt in ipairs(quickBets) do
+		local qBtn = Instance.new("TextButton", frame)
+		qBtn.Size = UDim2.new(0, 28, 0.7, 0)
+		qBtn.Position = UDim2.new(1, -36 + (i-3)*32, 0.15, 0)
+		qBtn.BackgroundColor3 = Color3.fromRGB(60, 30, 90)
+		qBtn.BorderSizePixel = 0
+		qBtn.Text = i == 3 and "MAX" or (amt >= 1000 and math.floor(amt/1000).."K" or tostring(amt))
+		qBtn.Font = Enum.Font.GothamBold
+		qBtn.TextSize = 9
+		qBtn.TextColor3 = Color3.fromRGB(200, 160, 255)
+		qBtn.ZIndex = frame.ZIndex + 2
+		corner(qBtn, 6)
+		local betAmount = amt
+		qBtn.MouseButton1Click:Connect(function()
+			betBox.Text = tostring(betAmount)
+		end)
+	end
+
+	return frame, betBox
+end
+
+-- ============================================================
+-- RESULT MESSAGE
+-- ============================================================
+local function makeResultMsg(parent, yPos)
+	local lbl = Instance.new("TextLabel", parent)
+	lbl.Name = "ResultMsg"
+	lbl.Size = UDim2.new(1, -40, 0, 36)
+	lbl.Position = UDim2.new(0, 20, 0, yPos)
+	lbl.BackgroundTransparency = 1
+	lbl.Text = ""
+	lbl.Font = Enum.Font.GothamBold
+	lbl.TextSize = 18
+	lbl.TextColor3 = Color3.fromRGB(255, 215, 50)
+	lbl.TextWrapped = true
+	lbl.ZIndex = parent.ZIndex + 1
+	return lbl
+end
+
+local function showResult(lbl, text, win)
+	lbl.Text = text
+	lbl.TextColor3 = win
+		and Color3.fromRGB(60, 220, 100)
+		or  Color3.fromRGB(255, 80, 80)
+	TweenService:Create(lbl, TweenInfo.new(0.3, Enum.EasingStyle.Back), {TextSize = 20}):Play()
+	task.delay(0.3, function()
+		TweenService:Create(lbl, TweenInfo.new(0.2), {TextSize = 18}):Play()
+	end)
+end
+
+-- ============================================================
+-- 🎰 SLOTS SCREEN
+-- ============================================================
+local slotsScreen = Instance.new("Frame", gui)
+slotsScreen.Size = UDim2.new(0, 440, 0, 400)
+slotsScreen.Position = UDim2.new(0.5, -220, 0.5, -200)
+slotsScreen.BackgroundColor3 = Color3.fromRGB(8, 4, 18)
+slotsScreen.BorderSizePixel = 0
+slotsScreen.ZIndex = 20
+slotsScreen.Visible = false
+corner(slotsScreen, 20)
+stroke(slotsScreen, Color3.fromRGB(140, 60, 220), 2)
+screens["slots"] = slotsScreen
+makeBackBtn(slotsScreen)
+
+local slotsGrad = Instance.new("UIGradient", slotsScreen)
+slotsGrad.Color = ColorSequence.new(Color3.fromRGB(22, 8, 42), Color3.fromRGB(8, 4, 18))
+slotsGrad.Rotation = 135
+
+local slotTitle = Instance.new("TextLabel", slotsScreen)
+slotTitle.Size = UDim2.new(1, 0, 0, 46)
+slotTitle.BackgroundTransparency = 1
+slotTitle.Text = "🎰 Slot Machine"
+slotTitle.Font = Enum.Font.GothamBold
+slotTitle.TextSize = 24
+slotTitle.TextColor3 = Color3.fromRGB(200, 140, 255)
+slotTitle.ZIndex = 21
+
+-- Reel display
+local reelFrame = Instance.new("Frame", slotsScreen)
+reelFrame.Size = UDim2.new(1, -60, 0, 100)
+reelFrame.Position = UDim2.new(0, 30, 0, 52)
+reelFrame.BackgroundColor3 = Color3.fromRGB(4, 2, 10)
+reelFrame.BorderSizePixel = 0
+reelFrame.ZIndex = 21
+corner(reelFrame, 14)
+stroke(reelFrame, Color3.fromRGB(80, 40, 120), 2)
+
+local reelLabels = {}
+local reelLayout = Instance.new("UIListLayout", reelFrame)
+reelLayout.FillDirection = Enum.FillDirection.Horizontal
+reelLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+reelLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+reelLayout.Padding = UDim.new(0, 4)
+
+for i = 1, 3 do
+	local reel = Instance.new("Frame", reelFrame)
+	reel.Size = UDim2.new(0, 100, 0.9, 0)
+	reel.BackgroundColor3 = Color3.fromRGB(14, 7, 28)
+	reel.BorderSizePixel = 0
+	reel.ZIndex = 22
+	corner(reel, 10)
+	local rl = Instance.new("TextLabel", reel)
+	rl.Size = UDim2.new(1, 0, 1, 0)
+	rl.BackgroundTransparency = 1
+	rl.Text = "❓"
+	rl.TextSize = 40
+	rl.Font = Enum.Font.GothamBold
+	rl.ZIndex = 23
+	reelLabels[i] = rl
+end
+
+local _, slotsBetBox = makeBetRow(slotsScreen, 164, 25)
+local slotsResult = makeResultMsg(slotsScreen, 218)
+
+local slotsSpinBtn = Instance.new("TextButton", slotsScreen)
+slotsSpinBtn.Size = UDim2.new(1, -40, 0, 48)
+slotsSpinBtn.Position = UDim2.new(0, 20, 0, 262)
+slotsSpinBtn.BackgroundColor3 = Color3.fromRGB(100, 30, 180)
+slotsSpinBtn.BorderSizePixel = 0
+slotsSpinBtn.Text = "🎰 SPIN!"
+slotsSpinBtn.Font = Enum.Font.GothamBold
+slotsSpinBtn.TextSize = 22
+slotsSpinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+slotsSpinBtn.ZIndex = 21
+corner(slotsSpinBtn, 12)
+local spinGrad = Instance.new("UIGradient", slotsSpinBtn)
+spinGrad.Color = ColorSequence.new(Color3.fromRGB(140, 40, 220), Color3.fromRGB(80, 20, 160))
+spinGrad.Rotation = 90
+
+local slotsBalanceLbl = Instance.new("TextLabel", slotsScreen)
+slotsBalanceLbl.Size = UDim2.new(1, -40, 0, 26)
+slotsBalanceLbl.Position = UDim2.new(0, 20, 0, 320)
+slotsBalanceLbl.BackgroundTransparency = 1
+slotsBalanceLbl.Text = "Balance: --"
+slotsBalanceLbl.Font = Enum.Font.GothamBold
+slotsBalanceLbl.TextSize = 15
+slotsBalanceLbl.TextColor3 = Color3.fromRGB(255, 215, 50)
+slotsBalanceLbl.ZIndex = 21
+
+local slotsInfo = Instance.new("TextLabel", slotsScreen)
+slotsInfo.Size = UDim2.new(1, -40, 0, 46)
+slotsInfo.Position = UDim2.new(0, 20, 0, 348)
+slotsInfo.BackgroundTransparency = 1
+slotsInfo.Text = "7️⃣7️⃣7️⃣ = 50x  💎💎💎 = 15x  ⭐⭐⭐ = 8x  🍒🍒 = 0.5x"
+slotsInfo.Font = Enum.Font.Gotham
+slotsInfo.TextSize = 11
+slotsInfo.TextColor3 = Color3.fromRGB(150, 120, 200)
+slotsInfo.TextWrapped = true
+slotsInfo.ZIndex = 21
+
+local slotSpinning = false
+slotsSpinBtn.MouseButton1Click:Connect(function()
+	if slotSpinning then return end
+	local bet = tonumber(slotsBetBox.Text)
+	if not bet then slotsResult.Text = "Enter a valid bet!"; return end
+
+	slotSpinning = true
+	slotsSpinBtn.Text = "Spinning..."
+	slotsResult.Text = ""
+
+	-- Spinning animation
+	local symbols = {"🍒","🍋","🍊","⭐","💎","🎰","7️⃣"}
+	for frame = 1, 12 do
+		for i = 1, 3 do
+			reelLabels[i].Text = symbols[math.random(#symbols)]
+		end
+		task.wait(0.08)
+	end
+
+	local ok, result = pcall(function()
+		return PlaySlots:InvokeServer(bet)
+	end)
+
+	if ok and result and result.Success then
+		-- Reveal reels
+		for i, sym in ipairs(result.Reels) do
+			reelLabels[i].Text = sym
+		end
+		showResult(slotsResult, result.Message, result.Payout > 0)
+		slotsBalanceLbl.Text = "Balance: " .. formatCash(result.NewCash)
+		balanceLabel.Text = "💰 Balance: " .. formatCash(result.NewCash)
+	else
+		slotsResult.Text = (result and result.Message) or "Error. Try again."
+		slotsResult.TextColor3 = Color3.fromRGB(255, 100, 100)
+	end
+
+	slotsSpinBtn.Text = "🎰 SPIN!"
+	slotSpinning = false
+end)
+
+-- ============================================================
+-- 🃏 BLACKJACK SCREEN
+-- ============================================================
+local bjScreen = Instance.new("Frame", gui)
+bjScreen.Size = UDim2.new(0, 500, 0, 480)
+bjScreen.Position = UDim2.new(0.5, -250, 0.5, -240)
+bjScreen.BackgroundColor3 = Color3.fromRGB(4, 18, 8)
+bjScreen.BorderSizePixel = 0
+bjScreen.ZIndex = 20
+bjScreen.Visible = false
+corner(bjScreen, 20)
+stroke(bjScreen, Color3.fromRGB(30, 160, 80), 2)
+screens["blackjack"] = bjScreen
+makeBackBtn(bjScreen)
+
+local bjGrad = Instance.new("UIGradient", bjScreen)
+bjGrad.Color = ColorSequence.new(Color3.fromRGB(6, 28, 12), Color3.fromRGB(4, 12, 6))
+bjGrad.Rotation = 135
+
+local bjTitle = Instance.new("TextLabel", bjScreen)
+bjTitle.Size = UDim2.new(1, 0, 0, 46)
+bjTitle.BackgroundTransparency = 1
+bjTitle.Text = "🃏 Blackjack"
+bjTitle.Font = Enum.Font.GothamBold
+bjTitle.TextSize = 24
+bjTitle.TextColor3 = Color3.fromRGB(80, 220, 120)
+bjTitle.ZIndex = 21
+
+local function makeCardArea(parent, label, yPos)
+	local lbl = Instance.new("TextLabel", parent)
+	lbl.Size = UDim2.new(1, -40, 0, 20)
+	lbl.Position = UDim2.new(0, 20, 0, yPos)
+	lbl.BackgroundTransparency = 1
+	lbl.Text = label
+	lbl.Font = Enum.Font.GothamBold
+	lbl.TextSize = 13
+	lbl.TextColor3 = Color3.fromRGB(140, 200, 160)
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+	lbl.ZIndex = 21
+
+	local cardsFrame = Instance.new("Frame", parent)
+	cardsFrame.Size = UDim2.new(1, -40, 0, 64)
+	cardsFrame.Position = UDim2.new(0, 20, 0, yPos + 22)
+	cardsFrame.BackgroundColor3 = Color3.fromRGB(6, 24, 10)
+	cardsFrame.BorderSizePixel = 0
+	cardsFrame.ZIndex = 21
+	corner(cardsFrame, 10)
+	stroke(cardsFrame, Color3.fromRGB(20, 100, 50), 1)
+
+	local cardsLabel = Instance.new("TextLabel", cardsFrame)
+	cardsLabel.Name = "Cards"
+	cardsLabel.Size = UDim2.new(0.7, 0, 1, 0)
+	cardsLabel.Position = UDim2.new(0, 10, 0, 0)
+	cardsLabel.BackgroundTransparency = 1
+	cardsLabel.Text = "—"
+	cardsLabel.Font = Enum.Font.GothamBold
+	cardsLabel.TextSize = 22
+	cardsLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+	cardsLabel.TextXAlignment = Enum.TextXAlignment.Left
+	cardsLabel.ZIndex = 22
+
+	local valueLabel = Instance.new("TextLabel", cardsFrame)
+	valueLabel.Name = "Value"
+	valueLabel.Size = UDim2.new(0.28, 0, 1, 0)
+	valueLabel.Position = UDim2.new(0.72, 0, 0, 0)
+	valueLabel.BackgroundTransparency = 1
+	valueLabel.Text = ""
+	valueLabel.Font = Enum.Font.GothamBold
+	valueLabel.TextSize = 18
+	valueLabel.TextColor3 = Color3.fromRGB(255, 215, 50)
+	valueLabel.ZIndex = 22
+
+	return cardsLabel, valueLabel
+end
+
+local dealerCardsLbl, dealerValueLbl = makeCardArea(bjScreen, "🎩 Dealer", 52)
+local playerCardsLbl, playerValueLbl = makeCardArea(bjScreen, "👤 You", 148)
+
+local _, bjBetBox = makeBetRow(bjScreen, 252, 100)
+local bjResult = makeResultMsg(bjScreen, 306)
+
+local function makeActionBtn(parent, text, x, color)
+	local btn = Instance.new("TextButton", parent)
+	btn.Size = UDim2.new(0, 104, 0, 40)
+	btn.Position = UDim2.new(0, x, 0, 356)
+	btn.BackgroundColor3 = color
+	btn.BorderSizePixel = 0
+	btn.Text = text
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 15
+	btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+	btn.ZIndex = 21
+	corner(btn, 10)
+	btn.Visible = false
+	return btn
+end
+
+local bjDealBtn  = makeActionBtn(bjScreen, "DEAL 🃏", 20,  Color3.fromRGB(20, 120, 60))
+local bjHitBtn   = makeActionBtn(bjScreen, "HIT ➕",  20,  Color3.fromRGB(20, 100, 200))
+local bjStandBtn = makeActionBtn(bjScreen, "STAND ✋", 132, Color3.fromRGB(180, 80, 20))
+local bjDoubleBtn= makeActionBtn(bjScreen, "DOUBLE 2x",244, Color3.fromRGB(140, 20, 140))
+local bjNewBtn   = makeActionBtn(bjScreen, "New Hand", 356, Color3.fromRGB(40, 80, 40))
+
+bjDealBtn.Visible = true
+bjDealBtn.Size = UDim2.new(1, -40, 0, 40)
+bjDealBtn.Position = UDim2.new(0, 20, 0, 356)
+
+local bjBal = Instance.new("TextLabel", bjScreen)
+bjBal.Size = UDim2.new(1, -40, 0, 24)
+bjBal.Position = UDim2.new(0, 20, 0, 408)
+bjBal.BackgroundTransparency = 1
+bjBal.Text = "Balance: --"
+bjBal.Font = Enum.Font.GothamBold
+bjBal.TextSize = 14
+bjBal.TextColor3 = Color3.fromRGB(255, 215, 50)
+bjBal.ZIndex = 21
+
+local function formatCards(hand)
+	if not hand then return "—", "" end
+	local str = ""
+	for _, card in ipairs(hand) do
+		str = str .. card.Face .. card.Suit .. " "
+	end
+	return str, ""
+end
+
+local function bjAction(action, betStr)
+	local bet = tonumber(betStr) or 100
+	local ok, result = pcall(function()
+		return PlayBlackjack:InvokeServer(action, bet)
+	end)
+	if not ok or not result then return end
+
+	if result.PlayerHand then
+		playerCardsLbl.Text = formatCards(result.PlayerHand)
+		if result.PlayerValue then playerValueLbl.Text = tostring(result.PlayerValue) end
+	end
+	if result.DealerHand then
+		dealerCardsLbl.Text = formatCards(result.DealerHand)
+		if result.DealerValue then dealerValueLbl.Text = tostring(result.DealerValue) end
+	elseif result.DealerHiddenCard then
+		dealerCardsLbl.Text = result.DealerHiddenCard.Face .. result.DealerHiddenCard.Suit .. " 🂠"
+		dealerValueLbl.Text = "?"
+	end
+
+	if result.GameOver then
+		showResult(bjResult, result.Result, result.Payout and result.Payout > 0)
+		if result.NewCash then
+			bjBal.Text = "Balance: " .. formatCash(result.NewCash)
+			balanceLabel.Text = "💰 Balance: " .. formatCash(result.NewCash)
+		end
+		bjHitBtn.Visible = false; bjStandBtn.Visible = false; bjDoubleBtn.Visible = false
+		bjNewBtn.Visible = true;  bjDealBtn.Visible = false
+	elseif action == "deal" then
+		bjDealBtn.Visible = false
+		bjHitBtn.Visible = true; bjStandBtn.Visible = true; bjDoubleBtn.Visible = true
+		if result.NewCash then bjBal.Text = "Balance: " .. formatCash(result.NewCash) end
+	end
+end
+
+bjDealBtn.MouseButton1Click:Connect(function() bjAction("deal", bjBetBox.Text) end)
+bjHitBtn.MouseButton1Click:Connect(function() bjAction("hit", bjBetBox.Text) end)
+bjStandBtn.MouseButton1Click:Connect(function() bjAction("stand", bjBetBox.Text) end)
+bjDoubleBtn.MouseButton1Click:Connect(function() bjAction("double", bjBetBox.Text) end)
+bjNewBtn.MouseButton1Click:Connect(function()
+	playerCardsLbl.Text = "—"; dealerCardsLbl.Text = "—"
+	playerValueLbl.Text = ""; dealerValueLbl.Text = ""
+	bjResult.Text = ""; bjNewBtn.Visible = false; bjDealBtn.Visible = true
+end)
+
+-- ============================================================
+-- 🎡 ROULETTE SCREEN
+-- ============================================================
+local roulScreen = Instance.new("Frame", gui)
+roulScreen.Size = UDim2.new(0, 500, 0, 440)
+roulScreen.Position = UDim2.new(0.5, -250, 0.5, -220)
+roulScreen.BackgroundColor3 = Color3.fromRGB(18, 4, 8)
+roulScreen.BorderSizePixel = 0
+roulScreen.ZIndex = 20
+roulScreen.Visible = false
+corner(roulScreen, 20)
+stroke(roulScreen, Color3.fromRGB(200, 50, 90), 2)
+screens["roulette"] = roulScreen
+makeBackBtn(roulScreen)
+
+local roulGrad = Instance.new("UIGradient", roulScreen)
+roulGrad.Color = ColorSequence.new(Color3.fromRGB(30, 6, 12), Color3.fromRGB(10, 2, 6))
+roulGrad.Rotation = 135
+
+local roulTitle = Instance.new("TextLabel", roulScreen)
+roulTitle.Size = UDim2.new(1, 0, 0, 46)
+roulTitle.BackgroundTransparency = 1
+roulTitle.Text = "🎡 Roulette"
+roulTitle.Font = Enum.Font.GothamBold
+roulTitle.TextSize = 24
+roulTitle.TextColor3 = Color3.fromRGB(255, 100, 140)
+roulTitle.ZIndex = 21
+
+-- Wheel display
+local wheelDisp = Instance.new("TextLabel", roulScreen)
+wheelDisp.Name = "WheelDisp"
+wheelDisp.Size = UDim2.new(1, -40, 0, 60)
+wheelDisp.Position = UDim2.new(0, 20, 0, 52)
+wheelDisp.BackgroundColor3 = Color3.fromRGB(14, 4, 8)
+wheelDisp.BackgroundTransparency = 0
+wheelDisp.BorderSizePixel = 0
+wheelDisp.Text = "🎡  Place your bet and spin!"
+wheelDisp.Font = Enum.Font.GothamBold
+wheelDisp.TextSize = 18
+wheelDisp.TextColor3 = Color3.fromRGB(255, 215, 50)
+wheelDisp.ZIndex = 21
+corner(wheelDisp, 12)
+stroke(wheelDisp, Color3.fromRGB(140, 30, 60), 1)
+
+-- Bet type selector
+local betTypes = {
+	{ type = "red",   label = "🔴 Red",    payout = "2x",  color = Color3.fromRGB(180, 30, 50)  },
+	{ type = "black", label = "⚫ Black",   payout = "2x",  color = Color3.fromRGB(40, 40, 40)   },
+	{ type = "odd",   label = "Odd",        payout = "2x",  color = Color3.fromRGB(60, 80, 160)  },
+	{ type = "even",  label = "Even",       payout = "2x",  color = Color3.fromRGB(80, 40, 140)  },
+	{ type = "low",   label = "1–18",       payout = "2x",  color = Color3.fromRGB(40, 100, 80)  },
+	{ type = "high",  label = "19–36",      payout = "2x",  color = Color3.fromRGB(40, 80, 100)  },
+	{ type = "dozen1",label = "1st 12",     payout = "3x",  color = Color3.fromRGB(100, 60, 20)  },
+	{ type = "dozen2",label = "2nd 12",     payout = "3x",  color = Color3.fromRGB(80, 50, 20)   },
+	{ type = "dozen3",label = "3rd 12",     payout = "3x",  color = Color3.fromRGB(60, 40, 20)   },
+}
+
+local selectedBetType = "red"
+local betBtns = {}
+
+local betGrid = Instance.new("Frame", roulScreen)
+betGrid.Size = UDim2.new(1, -40, 0, 110)
+betGrid.Position = UDim2.new(0, 20, 0, 120)
+betGrid.BackgroundTransparency = 1
+betGrid.ZIndex = 21
+
+local betGridLayout = Instance.new("UIGridLayout", betGrid)
+betGridLayout.CellSize = UDim2.new(0, 96, 0, 48)
+betGridLayout.CellPadding = UDim2.new(0, 6, 0, 6)
+betGridLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+
+for _, bt in ipairs(betTypes) do
+	local bb = Instance.new("TextButton", betGrid)
+	bb.BackgroundColor3 = bt.color
+	bb.BorderSizePixel = 0
+	bb.Text = bt.label .. "\n" .. bt.payout
+	bb.Font = Enum.Font.GothamBold
+	bb.TextSize = 11
+	bb.TextColor3 = Color3.fromRGB(255, 255, 255)
+	bb.ZIndex = 22
+	corner(bb, 8)
+	local btType = bt.type
+	bb.MouseButton1Click:Connect(function()
+		selectedBetType = btType
+		for _, b in pairs(betBtns) do
+			Instance.new("UIStroke", b):Destroy()
+		end
+		stroke(bb, Color3.fromRGB(255, 215, 50), 2)
+	end)
+	betBtns[btType] = bb
+end
+
+local _, roulBetBox = makeBetRow(roulScreen, 244, 50)
+local roulResult = makeResultMsg(roulScreen, 298)
+
+local roulSpinBtn = Instance.new("TextButton", roulScreen)
+roulSpinBtn.Size = UDim2.new(1, -40, 0, 44)
+roulSpinBtn.Position = UDim2.new(0, 20, 0, 344)
+roulSpinBtn.BackgroundColor3 = Color3.fromRGB(160, 30, 70)
+roulSpinBtn.BorderSizePixel = 0
+roulSpinBtn.Text = "🎡 SPIN WHEEL"
+roulSpinBtn.Font = Enum.Font.GothamBold
+roulSpinBtn.TextSize = 20
+roulSpinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+roulSpinBtn.ZIndex = 21
+corner(roulSpinBtn, 12)
+
+local roulBal = Instance.new("TextLabel", roulScreen)
+roulBal.Size = UDim2.new(1, -40, 0, 24)
+roulBal.Position = UDim2.new(0, 20, 0, 400)
+roulBal.BackgroundTransparency = 1
+roulBal.Text = "Balance: --"
+roulBal.Font = Enum.Font.GothamBold
+roulBal.TextSize = 14
+roulBal.TextColor3 = Color3.fromRGB(255, 215, 50)
+roulBal.ZIndex = 21
+
+local roulSpinning = false
+roulSpinBtn.MouseButton1Click:Connect(function()
+	if roulSpinning then return end
+	local bet = tonumber(roulBetBox.Text)
+	if not bet then roulResult.Text = "Enter a valid bet!"; return end
+
+	roulSpinning = true
+	roulSpinBtn.Text = "Spinning..."
+	roulResult.Text = ""
+
+	-- Spin animation
+	local nums = {}
+	for i = 0, 36 do table.insert(nums, i) end
+	for f = 1, 16 do
+		wheelDisp.Text = "🎡  " .. nums[math.random(#nums)]
+		task.wait(0.06 + f * 0.012)
+	end
+
+	local ok, result = pcall(function()
+		return PlayRoulette:InvokeServer(selectedBetType, nil, bet)
+	end)
+
+	if ok and result and result.Success then
+		local color = result.ResultColor == "red" and "🔴" or result.ResultColor == "black" and "⚫" or "🟢"
+		wheelDisp.Text = color .. "  " .. result.Result
+		showResult(roulResult, result.Message, result.Won)
+		roulBal.Text = "Balance: " .. formatCash(result.NewCash)
+		balanceLabel.Text = "💰 Balance: " .. formatCash(result.NewCash)
+	else
+		roulResult.Text = (result and result.Message) or "Error."
+		roulResult.TextColor3 = Color3.fromRGB(255, 100, 100)
+	end
+
+	roulSpinBtn.Text = "🎡 SPIN WHEEL"
+	roulSpinning = false
+end)
+
+-- ============================================================
+-- 🪙 COIN FLIP SCREEN
+-- ============================================================
+local coinScreen = Instance.new("Frame", gui)
+coinScreen.Size = UDim2.new(0, 420, 0, 380)
+coinScreen.Position = UDim2.new(0.5, -210, 0.5, -190)
+coinScreen.BackgroundColor3 = Color3.fromRGB(14, 12, 4)
+coinScreen.BorderSizePixel = 0
+coinScreen.ZIndex = 20
+coinScreen.Visible = false
+corner(coinScreen, 20)
+stroke(coinScreen, Color3.fromRGB(200, 170, 20), 2)
+screens["coinflip"] = coinScreen
+makeBackBtn(coinScreen)
+
+local coinGrad = Instance.new("UIGradient", coinScreen)
+coinGrad.Color = ColorSequence.new(Color3.fromRGB(24, 20, 4), Color3.fromRGB(10, 8, 2))
+coinGrad.Rotation = 135
+
+local coinTitle = Instance.new("TextLabel", coinScreen)
+coinTitle.Size = UDim2.new(1, 0, 0, 46)
+coinTitle.BackgroundTransparency = 1
+coinTitle.Text = "🪙 Coin Flip / Dice"
+coinTitle.Font = Enum.Font.GothamBold
+coinTitle.TextSize = 24
+coinTitle.TextColor3 = Color3.fromRGB(255, 210, 50)
+coinTitle.ZIndex = 21
+
+-- Mode selector
+local coinMode = "coin"
+local coinChoice = "heads"
+
+local modeRow = Instance.new("Frame", coinScreen)
+modeRow.Size = UDim2.new(1, -40, 0, 38)
+modeRow.Position = UDim2.new(0, 20, 0, 52)
+modeRow.BackgroundTransparency = 1
+modeRow.ZIndex = 21
+
+local function makeModeBtn(text, x, modeVal)
+	local btn = Instance.new("TextButton", modeRow)
+	btn.Size = UDim2.new(0, 116, 1, 0)
+	btn.Position = UDim2.new(0, x, 0, 0)
+	btn.BackgroundColor3 = Color3.fromRGB(30, 25, 8)
+	btn.BorderSizePixel = 0
+	btn.Text = text
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 13
+	btn.TextColor3 = Color3.fromRGB(200, 180, 80)
+	btn.ZIndex = 22
+	corner(btn, 8)
+	stroke(btn, Color3.fromRGB(120, 100, 20), 1)
+	return btn, modeVal
+end
+
+local coinBtn, _ = makeModeBtn("🪙 Coin Flip", 0, "coin")
+local diceBtn, _ = makeModeBtn("🎲 Hi/Lo Dice", 122, "dice")
+local exactBtn, _ = makeModeBtn("🎲 Exact (5x)", 244, "dice_exact")
+
+local coinDisplay = Instance.new("TextLabel", coinScreen)
+coinDisplay.Size = UDim2.new(1, -40, 0, 80)
+coinDisplay.Position = UDim2.new(0, 20, 0, 98)
+coinDisplay.BackgroundColor3 = Color3.fromRGB(20, 16, 4)
+coinDisplay.BackgroundTransparency = 0
+coinDisplay.BorderSizePixel = 0
+coinDisplay.Text = "🪙"
+coinDisplay.TextSize = 48
+coinDisplay.Font = Enum.Font.GothamBold
+coinDisplay.TextColor3 = Color3.fromRGB(255, 210, 50)
+coinDisplay.ZIndex = 21
+corner(coinDisplay, 12)
+
+local choiceRow = Instance.new("Frame", coinScreen)
+choiceRow.Size = UDim2.new(1, -40, 0, 44)
+choiceRow.Position = UDim2.new(0, 20, 0, 186)
+choiceRow.BackgroundTransparency = 1
+choiceRow.ZIndex = 21
+
+local headsBtn = Instance.new("TextButton", choiceRow)
+headsBtn.Size = UDim2.new(0.48, 0, 1, 0)
+headsBtn.BackgroundColor3 = Color3.fromRGB(30, 25, 8)
+headsBtn.BorderSizePixel = 0
+headsBtn.Text = "HEADS"
+headsBtn.Font = Enum.Font.GothamBold
+headsBtn.TextSize = 16
+headsBtn.TextColor3 = Color3.fromRGB(255, 215, 50)
+headsBtn.ZIndex = 22
+corner(headsBtn, 10)
+stroke(headsBtn, Color3.fromRGB(255, 215, 50), 2)
+
+local tailsBtn = Instance.new("TextButton", choiceRow)
+tailsBtn.Size = UDim2.new(0.48, 0, 1, 0)
+tailsBtn.Position = UDim2.new(0.52, 0, 0, 0)
+tailsBtn.BackgroundColor3 = Color3.fromRGB(30, 25, 8)
+tailsBtn.BorderSizePixel = 0
+tailsBtn.Text = "TAILS"
+tailsBtn.Font = Enum.Font.GothamBold
+tailsBtn.TextSize = 16
+tailsBtn.TextColor3 = Color3.fromRGB(200, 180, 80)
+tailsBtn.ZIndex = 22
+corner(tailsBtn, 10)
+
+headsBtn.MouseButton1Click:Connect(function()
+	coinChoice = "heads"
+	stroke(headsBtn, Color3.fromRGB(255, 215, 50), 2)
+	for _, s in ipairs(tailsBtn:GetChildren()) do if s:IsA("UIStroke") then s:Destroy() end end
+end)
+tailsBtn.MouseButton1Click:Connect(function()
+	coinChoice = "tails"
+	stroke(tailsBtn, Color3.fromRGB(255, 215, 50), 2)
+	for _, s in ipairs(headsBtn:GetChildren()) do if s:IsA("UIStroke") then s:Destroy() end end
+end)
+
+local _, coinBetBox = makeBetRow(coinScreen, 242, 500)
+local coinResult = makeResultMsg(coinScreen, 296)
+
+local coinFlipBtn = Instance.new("TextButton", coinScreen)
+coinFlipBtn.Size = UDim2.new(1, -40, 0, 44)
+coinFlipBtn.Position = UDim2.new(0, 20, 0, 318)
+coinFlipBtn.BackgroundColor3 = Color3.fromRGB(140, 110, 10)
+coinFlipBtn.BorderSizePixel = 0
+coinFlipBtn.Text = "🪙 FLIP!"
+coinFlipBtn.Font = Enum.Font.GothamBold
+coinFlipBtn.TextSize = 22
+coinFlipBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+coinFlipBtn.ZIndex = 21
+corner(coinFlipBtn, 12)
+
+local coinBal = Instance.new("TextLabel", coinScreen)
+coinBal.Size = UDim2.new(1, -40, 0, 24)
+coinBal.Position = UDim2.new(0, 20, 0, 372)
+coinBal.BackgroundTransparency = 1
+coinBal.Text = "Balance: --"
+coinBal.Font = Enum.Font.GothamBold
+coinBal.TextSize = 14
+coinBal.TextColor3 = Color3.fromRGB(255, 215, 50)
+coinBal.ZIndex = 21
+
+local flipping = false
+coinFlipBtn.MouseButton1Click:Connect(function()
+	if flipping then return end
+	local bet = tonumber(coinBetBox.Text)
+	if not bet then coinResult.Text = "Enter a valid bet!"; return end
+
+	flipping = true
+	coinFlipBtn.Text = "Flipping..."
+	local flipFrames = {"🪙","⚡","🪙","⚡","🪙","⚡","🪙"}
+	for _, f in ipairs(flipFrames) do
+		coinDisplay.Text = f
+		task.wait(0.1)
+	end
+
+	local ok, result = pcall(function()
+		return PlayCoinFlip:InvokeServer(coinMode, coinChoice, bet)
+	end)
+
+	if ok and result and result.Success then
+		coinDisplay.Text = result.Result == "heads" and "🪙 H" or "🪙 T"
+		showResult(coinResult, result.Message, result.Won)
+		coinBal.Text = "Balance: " .. formatCash(result.NewCash)
+		balanceLabel.Text = "💰 Balance: " .. formatCash(result.NewCash)
+	else
+		coinResult.Text = (result and result.Message) or "Error."
+		coinResult.TextColor3 = Color3.fromRGB(255, 100, 100)
+	end
+
+	coinFlipBtn.Text = "🪙 FLIP!"
+	flipping = false
+end)
+
+-- ============================================================
+-- OPEN CASINO from proximity prompt
+-- ============================================================
+OpenCasinoEntrance.OnClientEvent:Connect(function(casinoNameOrPlotIndex)
+	if type(casinoNameOrPlotIndex) == "string" then
+		menuTitle.Text = "🎰 " .. casinoNameOrPlotIndex
+	end
+	menu.Visible = true
+	openGUI()
+end)
