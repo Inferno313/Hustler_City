@@ -1,0 +1,142 @@
+// This is code for the dancing on the yellow shit
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+
+local player = Players.LocalPlayer
+
+-- ========================================
+-- CONFIG
+-- ========================================
+local ROTATION_SPEED = 180 -- degrees per second
+local SUCCESS_WINDOW = 15 -- degrees tolerance
+local REQUIRED_SUCCESSES = 3
+
+-- ========================================
+-- GUI
+-- ========================================
+local gui = Instance.new("ScreenGui")
+gui.Name = "LockGame"
+gui.Parent = player:WaitForChild("PlayerGui")
+gui.Enabled = false
+
+local container = Instance.new("Frame", gui)
+container.Size = UDim2.new(0, 300, 0, 300)
+container.Position = UDim2.new(0.5, -150, 0.5, -150)
+container.BackgroundTransparency = 1
+
+-- Lock Base
+local lockBase = Instance.new("Frame", container)
+lockBase.Size = UDim2.new(1,0,1,0)
+lockBase.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+lockBase.BorderSizePixel = 0
+lockBase.AnchorPoint = Vector2.new(0.5,0.5)
+lockBase.Position = UDim2.new(0.5,0,0.5,0)
+lockBase.Rotation = 0
+Instance.new("UICorner", lockBase).CornerRadius = UDim.new(1,0)
+
+-- Sweet Spot (Success Zone)
+local successZone = Instance.new("Frame", lockBase)
+successZone.Size = UDim2.new(0, 20, 0, 80)
+successZone.Position = UDim2.new(0.5,-10,0,0)
+successZone.BackgroundColor3 = Color3.fromRGB(80,255,120)
+successZone.BorderSizePixel = 0
+Instance.new("UICorner", successZone).CornerRadius = UDim.new(0,8)
+
+-- Indicator Needle
+local needle = Instance.new("Frame", lockBase)
+needle.Size = UDim2.new(0, 6, 0, 130)
+needle.Position = UDim2.new(0.5,-3,0.5,-130)
+needle.BackgroundColor3 = Color3.fromRGB(255,200,60)
+needle.BorderSizePixel = 0
+needle.AnchorPoint = Vector2.new(0.5,1)
+
+-- Progress Label
+local progressLabel = Instance.new("TextLabel", container)
+progressLabel.Size = UDim2.new(1,0,0,40)
+progressLabel.Position = UDim2.new(0,0,1,10)
+progressLabel.BackgroundTransparency = 1
+progressLabel.Text = "Progress: 0/"..REQUIRED_SUCCESSES
+progressLabel.TextColor3 = Color3.new(1,1,1)
+progressLabel.Font = Enum.Font.GothamBold
+progressLabel.TextSize = 18
+
+-- ========================================
+-- GAME STATE
+-- ========================================
+local rotating = false
+local currentAngle = 0
+local successes = 0
+local targetAngle = math.random(0,360)
+
+-- ========================================
+-- START GAME
+-- ========================================
+local function startLockGame()
+	gui.Enabled = true
+	rotating = true
+	successes = 0
+	progressLabel.Text = "Progress: 0/"..REQUIRED_SUCCESSES
+	targetAngle = math.random(0,360)
+	successZone.Rotation = targetAngle
+end
+
+-- ========================================
+-- STOP GAME
+-- ========================================
+local function stopLockGame()
+	rotating = false
+	gui.Enabled = false
+end
+
+-- ========================================
+-- ROTATION LOOP
+-- ========================================
+RunService.RenderStepped:Connect(function(dt)
+	if not rotating then return end
+	
+	currentAngle += ROTATION_SPEED * dt
+	currentAngle %= 360
+	
+	lockBase.Rotation = currentAngle
+end)
+
+-- ========================================
+-- INPUT (CLICK TO ATTEMPT)
+-- ========================================
+container.InputBegan:Connect(function(input)
+	if not rotating then return end
+	if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+	
+	local diff = math.abs(currentAngle - targetAngle)
+	diff = math.min(diff, 360 - diff)
+	
+	if diff <= SUCCESS_WINDOW then
+		successes += 1
+		progressLabel.Text = "Progress: "..successes.."/"..REQUIRED_SUCCESSES
+		
+		if successes >= REQUIRED_SUCCESSES then
+			progressLabel.Text = "Unlocked!"
+			
+			TweenService:Create(lockBase, TweenInfo.new(0.4), {
+				Rotation = lockBase.Rotation + 90
+			}):Play()
+			
+			task.wait(0.6)
+			stopLockGame()
+			return
+		end
+		
+		targetAngle = math.random(0,360)
+		successZone.Rotation = targetAngle
+	else
+		successes = 0
+		progressLabel.Text = "Failed! Progress reset."
+	end
+end)
+
+-- ========================================
+-- CALL THIS WHEN YOU WANT TO OPEN IT
+-- ========================================
+startLockGame()
