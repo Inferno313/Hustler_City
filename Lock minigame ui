@@ -1,0 +1,289 @@
+-- StarterGui > LockMinigameGUI > LocalScript
+
+local Players    = game:GetService("Players")
+local RS         = game:GetService("ReplicatedStorage")
+local UIS        = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local player    = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local openEvent   = RS:WaitForChild("MinigameOpen",   20)
+local resultEvent = RS:WaitForChild("MinigameResult", 20)
+local stopEvent   = RS:WaitForChild("MinigameStop",   20)
+
+if not openEvent or not resultEvent or not stopEvent then
+	warn("[PopALock] Missing RemoteEvents — aborting")
+	return
+end
+-- ── Sounds ────────────────────────────────────────────────────────────────────
+local SoundService = game:GetService("SoundService")
+
+local function makeSound(assetId, volume, pitch)
+	local s = Instance.new("Sound")
+	s.SoundId = assetId
+	s.Volume  = volume or 1
+	s.RollOffMaxDistance = 0   -- 2D sound (UI, not 3D world)
+	s.Parent = SoundService
+	if pitch then s.PlaybackSpeed = pitch end
+	return s
+end
+
+-- Swap these asset IDs for the ones you gave me
+local hitSound    = makeSound("rbxassetid://6988710942", 1)               -- satisfying hit
+local payoutSound = makeSound("rbxassetid://72764897006138", .8)           -- cashout
+local missSound   = makeSound("rbxassetid://94135799095134", .4)           -- fail/miss
+-- ── Constants ─────────────────────────────────────────────────────────────────
+local RADIUS     = 110
+local DIAL_SIZE  = 280
+local DOT_SIZE   = 22
+local ZONE_W     = 60
+local ZONE_H     = 18
+local TARGET_DEG = 28
+
+local function calcReward(speed)
+	if speed >= 800 then return 250 end
+	return math.max(25, math.floor(speed / 6))
+end
+
+-- ── State ─────────────────────────────────────────────────────────────────────
+local isPlaying    = false
+local rotSpeed     = 0
+local currentAngle = 0
+local targetAngle  = 60
+local totalEarned  = 0
+local hitCooldown  = false
+local animConn     = nil
+
+-- ── Build GUI ─────────────────────────────────────────────────────────────────
+local sg = playerGui:FindFirstChild("LockMinigameGUI") or Instance.new("ScreenGui")
+sg.Name = "LockMinigameGUI"; sg.ResetOnSpawn = false
+sg.IgnoreGuiInset = true; sg.Enabled = false; sg.Parent = playerGui
+
+local function newFrame(parent, name, size, pos, color, zindex)
+	local f = Instance.new("Frame", parent)
+	f.Name = name; f.Size = size; f.Position = pos
+	f.BackgroundColor3 = color; f.BorderSizePixel = 0; f.ZIndex = zindex
+	return f
+end
+
+-- Backdrop
+local backdrop = newFrame(sg,"Backdrop",UDim2.new(1,0,1,0),UDim2.new(0,0,0,0),Color3.new(0,0,0),1)
+backdrop.BackgroundTransparency = 0.5
+
+-- Panel
+local panel = newFrame(sg,"Panel",UDim2.new(0,340,0,495),UDim2.new(0.5,0,0.5,0),Color3.fromRGB(18,12,30),2)
+panel.AnchorPoint = Vector2.new(0.5,0.5)
+Instance.new("UICorner",panel).CornerRadius = UDim.new(0,18)
+local panelStroke = Instance.new("UIStroke",panel)
+panelStroke.Color = Color3.fromRGB(180,80,255); panelStroke.Thickness = 3
+
+-- Title
+local titleLbl = Instance.new("TextLabel",panel)
+titleLbl.Size=UDim2.new(1,0,0,40); titleLbl.Position=UDim2.new(0,0,0,10)
+titleLbl.BackgroundTransparency=1; titleLbl.Text="🔒  POP-A-LOCK"
+titleLbl.Font=Enum.Font.GothamBold; titleLbl.TextSize=22
+titleLbl.TextColor3=Color3.fromRGB(255,220,60); titleLbl.ZIndex=3
+
+-- Ring
+local ring = newFrame(panel,"Ring",UDim2.new(0,DIAL_SIZE,0,DIAL_SIZE),
+	UDim2.new(0.5,0,0,56),Color3.fromRGB(28,16,46),3)
+ring.AnchorPoint=Vector2.new(0.5,0)
+Instance.new("UICorner",ring).CornerRadius=UDim.new(1,0)
+local ringStroke=Instance.new("UIStroke",ring)
+ringStroke.Color=Color3.fromRGB(160,60,255); ringStroke.Thickness=10
+
+-- Lock emoji
+local lockLbl=Instance.new("TextLabel",ring)
+lockLbl.Size=UDim2.new(0,80,0,80); lockLbl.AnchorPoint=Vector2.new(0.5,0.5)
+lockLbl.Position=UDim2.new(0.5,0,0.5,0); lockLbl.BackgroundTransparency=1
+lockLbl.Text="🔒"; lockLbl.TextSize=44; lockLbl.Font=Enum.Font.GothamBold
+lockLbl.TextColor3=Color3.new(1,1,1); lockLbl.ZIndex=4
+
+-- Green zone
+local zone=newFrame(ring,"Zone",UDim2.new(0,ZONE_W,0,ZONE_H),
+	UDim2.new(0,0,0,0),Color3.fromRGB(60,220,90),4)
+zone.AnchorPoint=Vector2.new(0.5,0.5)
+Instance.new("UICorner",zone).CornerRadius=UDim.new(0,6)
+
+-- Dot glow
+local glow=newFrame(ring,"Glow",UDim2.new(0,DOT_SIZE+18,0,DOT_SIZE+18),
+	UDim2.new(0,0,0,0),Color3.fromRGB(255,80,80),5)
+glow.AnchorPoint=Vector2.new(0.5,0.5); glow.BackgroundTransparency=0.55
+Instance.new("UICorner",glow).CornerRadius=UDim.new(1,0)
+
+-- Dot
+local dot=newFrame(ring,"Dot",UDim2.new(0,DOT_SIZE,0,DOT_SIZE),
+	UDim2.new(0,0,0,0),Color3.fromRGB(255,55,55),6)
+dot.AnchorPoint=Vector2.new(0.5,0.5)
+Instance.new("UICorner",dot).CornerRadius=UDim.new(1,0)
+
+-- Speed label
+local speedLbl=Instance.new("TextLabel",panel)
+speedLbl.Size=UDim2.new(1,-20,0,22); speedLbl.Position=UDim2.new(0,10,0,350)
+speedLbl.BackgroundTransparency=1; speedLbl.Text="SPEED: —"
+speedLbl.Font=Enum.Font.GothamBold; speedLbl.TextSize=14
+speedLbl.TextColor3=Color3.fromRGB(200,160,255); speedLbl.ZIndex=3
+
+-- Next hit reward label
+local rewardLbl=Instance.new("TextLabel",panel)
+rewardLbl.Size=UDim2.new(1,-20,0,22); rewardLbl.Position=UDim2.new(0,10,0,372)
+rewardLbl.BackgroundTransparency=1; rewardLbl.Text="NEXT HIT: $25"
+rewardLbl.Font=Enum.Font.GothamBold; rewardLbl.TextSize=14
+rewardLbl.TextColor3=Color3.fromRGB(100,255,140); rewardLbl.ZIndex=3
+
+-- Earned / pending label
+local earnLbl=Instance.new("TextLabel",panel)
+earnLbl.Size=UDim2.new(1,-20,0,22); earnLbl.Position=UDim2.new(0,10,0,394)
+earnLbl.BackgroundTransparency=1; earnLbl.Text="PENDING: $0  (paid on stop)"
+earnLbl.Font=Enum.Font.GothamBold; earnLbl.TextSize=13
+earnLbl.TextColor3=Color3.fromRGB(255,220,60); earnLbl.ZIndex=3
+
+-- Press banner
+local banner=newFrame(panel,"Banner",UDim2.new(0,260,0,36),
+	UDim2.new(0.5,0,0,420),Color3.fromRGB(255,200,0),4)
+banner.AnchorPoint=Vector2.new(0.5,0)
+Instance.new("UICorner",banner).CornerRadius=UDim.new(0,8)
+local pressLbl=Instance.new("TextLabel",banner)
+pressLbl.Size=UDim2.new(1,0,1,0); pressLbl.BackgroundTransparency=1
+pressLbl.Text="▶  PRESS  SPACEBAR"
+pressLbl.Font=Enum.Font.GothamBold; pressLbl.TextSize=15
+pressLbl.TextColor3=Color3.fromRGB(20,10,40); pressLbl.ZIndex=5
+
+-- Stop / collect button
+local stopBtn=Instance.new("TextButton",panel)
+stopBtn.Size=UDim2.new(0,200,0,34); stopBtn.AnchorPoint=Vector2.new(0.5,0)
+stopBtn.Position=UDim2.new(0.5,0,0,460)
+stopBtn.BackgroundColor3=Color3.fromRGB(60,180,80)
+stopBtn.TextColor3=Color3.new(1,1,1); stopBtn.Font=Enum.Font.GothamBold
+stopBtn.TextSize=14; stopBtn.Text="✅  STOP & COLLECT $0"
+stopBtn.ZIndex=4; stopBtn.Visible=false
+Instance.new("UICorner",stopBtn).CornerRadius=UDim.new(0,8)
+
+-- ── Helpers ───────────────────────────────────────────────────────────────────
+local function posOnRing(deg)
+	local rad=math.rad(deg)
+	return UDim2.new(0, DIAL_SIZE/2+math.sin(rad)*RADIUS, 0, DIAL_SIZE/2-math.cos(rad)*RADIUS)
+end
+
+local function placeZone(deg)
+	zone.Position=posOnRing(deg); zone.Rotation=deg
+end
+
+local function angleDiff(a,b)
+	local d=(a-b)%360; if d>180 then d=d-360 end; return math.abs(d)
+end
+
+local function inZone()
+	return angleDiff(currentAngle,targetAngle)<=TARGET_DEG
+end
+
+local function speedColor(s)
+	if s<200 then     return Color3.fromRGB(160,60,255)   -- purple
+	elseif s<350 then return Color3.fromRGB(255,200,0)    -- gold
+	elseif s<500 then return Color3.fromRGB(255,130,0)    -- orange
+	elseif s<800 then return Color3.fromRGB(255,40,40)    -- red
+	else              return Color3.fromRGB(0,220,255)    -- electric blue (max tier)
+	end
+end
+
+local function setBanner(text,bg,fg)
+	pressLbl.Text=text; banner.BackgroundColor3=bg; pressLbl.TextColor3=fg; banner.Visible=true
+end
+
+-- ── Core ──────────────────────────────────────────────────────────────────────
+local function closeUI()
+	sg.Enabled=false
+	if animConn then animConn:Disconnect(); animConn=nil end
+	isPlaying=false; hitCooldown=false
+end
+
+local function endMinigame(voluntary)
+	if not isPlaying then return end
+	closeUI()
+	if voluntary then
+		stopEvent:FireServer()
+		if totalEarned > 0 then
+			payoutSound.TimePosition = 0
+			payoutSound:Play()
+		end
+	else
+		resultEvent:FireServer(false)
+		-- play miss sound on non-voluntary end
+		missSound.TimePosition = 0
+		missSound:Play()
+	end
+	totalEarned=0
+	earnLbl.Text="PENDING: $0  (paid on stop)"
+	stopBtn.Text="✅  STOP & COLLECT $0"
+end
+
+local function startMinigame(rawSpeed)
+	local speed=tonumber(rawSpeed) or 150
+	rotSpeed=speed
+	ringStroke.Color=speedColor(speed)
+	speedLbl.Text=string.format("SPEED: %.0f°/s", speed)
+	rewardLbl.Text=string.format("NEXT HIT: $%d", calcReward(speed))
+	if isPlaying then return end
+
+	isPlaying=true; hitCooldown=false
+	currentAngle=0; targetAngle=math.random(0,359)
+	totalEarned=0
+	earnLbl.Text="PENDING: $0  (paid on stop)"
+	stopBtn.Text="✅  STOP & COLLECT $0"
+
+	placeZone(targetAngle)
+	zone.BackgroundColor3=Color3.fromRGB(60,220,90)
+	setBanner("▶  PRESS  SPACEBAR",Color3.fromRGB(255,200,0),Color3.fromRGB(20,10,40))
+	stopBtn.Visible=false
+	sg.Enabled=true
+
+	animConn=RunService.RenderStepped:Connect(function(dt)
+		if not isPlaying then return end
+		currentAngle=(currentAngle+rotSpeed*dt)%360
+		local p=posOnRing(currentAngle)
+		dot.Position=p; glow.Position=p
+		zone.BackgroundColor3=inZone()
+			and Color3.fromRGB(130,255,150)
+			or  Color3.fromRGB(60,220,90)
+	end)
+end
+
+-- ── Input ─────────────────────────────────────────────────────────────────────
+UIS.InputBegan:Connect(function(input,processed)
+	if processed or not isPlaying or hitCooldown then return end
+	if input.KeyCode~=Enum.KeyCode.Space then return end
+
+	if inZone() then
+		hitCooldown=true
+		local reward=calcReward(rotSpeed)
+		totalEarned+=reward
+		-- dynamic pitch scaling + instant-rewind
+		hitSound.PlaybackSpeed = math.clamp(rotSpeed / 300, 0.9, 1.5)
+		hitSound.TimePosition = 0
+		hitSound:Play()
+		earnLbl.Text=string.format("PENDING: $%d  (paid on stop)", totalEarned)
+		stopBtn.Text=string.format("✅  STOP & COLLECT $%d", totalEarned)
+		setBanner(string.format("✅  HIT! +$%d", reward),Color3.fromRGB(50,210,90),Color3.fromRGB(255,255,255))
+		stopBtn.Visible=false
+
+		targetAngle=math.random(0,359)
+		placeZone(targetAngle)
+		resultEvent:FireServer(true)
+
+		task.delay(0.7,function()
+			if isPlaying then
+				setBanner("▶  PRESS  SPACEBAR",Color3.fromRGB(255,200,0),Color3.fromRGB(20,10,40))
+				stopBtn.Visible=true
+				rewardLbl.Text=string.format("NEXT HIT: $%d", calcReward(rotSpeed))
+			end
+			hitCooldown=false
+		end)
+	else
+		setBanner(string.format("❌  MISS!  Lost $%d", totalEarned),Color3.fromRGB(200,40,40),Color3.fromRGB(255,255,255))
+		endMinigame(false)
+	end
+end)
+
+stopBtn.MouseButton1Click:Connect(function() endMinigame(true) end)
+openEvent.OnClientEvent:Connect(function(speed) startMinigame(speed) end)
