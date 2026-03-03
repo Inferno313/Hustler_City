@@ -1,0 +1,83 @@
+---module script
+local CasinoService = {}
+local LotService, DataManager
+
+local PLACEHOLDER_COLORS = {
+	Pink   = Color3.fromRGB(255, 130, 180),
+	Yellow = Color3.fromRGB(255, 210, 50),
+	Blue   = Color3.fromRGB(80, 160, 255),
+}
+local PLACEHOLDER_SIZES = {
+	Pink   = Vector3.new(40, 20, 40),
+	Yellow = Vector3.new(28, 14, 28),
+	Blue   = Vector3.new(16, 8, 16),
+}
+
+function CasinoService.init(ls, dm)
+	LotService  = ls
+	DataManager = dm
+end
+
+local function getLotCFrame(lotPart)
+	if lotPart:IsA("Model") and lotPart.PrimaryPart then
+		return lotPart.PrimaryPart.CFrame
+	elseif lotPart:IsA("BasePart") then
+		return lotPart.CFrame
+	end
+	return CFrame.new(0, 0, 0)
+end
+
+local function spawnPlaceholder(lotType, cframe)
+	local size  = PLACEHOLDER_SIZES[lotType] or Vector3.new(20, 10, 20)
+	local part  = Instance.new("Part")
+	part.Name     = "CasinoPlaceholder"
+	part.Size     = size
+	part.Color    = PLACEHOLDER_COLORS[lotType] or Color3.fromRGB(200, 200, 200)
+	part.Material = Enum.Material.SmoothPlastic
+	part.Anchored = true
+	part.CFrame   = cframe * CFrame.new(0, size.Y / 2, 0)
+	part.Parent   = workspace
+	return part
+end
+
+function CasinoService.purchase(player, lotId)
+	local data = DataManager:GetData(player)
+	if not data then return false, "Data not loaded." end
+	if LotService.getPlayerLot(player) then return false, "You already own a casino. Sell it first." end
+	if not LotService.isAvailable(lotId)   then return false, "Lot is not available." end
+	if not LotService.isPurchasable(lotId) then return false, "This lot cannot be purchased." end
+
+	local state = LotService.getState(lotId)
+	if data.Cash < state.price then return false, "Insufficient funds." end
+
+	local lotPart = LotService.getLotPart(lotId)
+	if not lotPart then return false, "Lot part missing from Workspace." end
+
+	local casino = spawnPlaceholder(state.lotType, getLotCFrame(lotPart))
+	casino.Name  = player.Name .. "_Casino"
+
+	DataManager:AddCash(player, -state.price)
+	LotService.claim(player, lotId, casino)
+
+	return true, state.price
+end
+
+function CasinoService.sell(player)
+	local data = DataManager:GetData(player)
+	if not data then return false, "Data not loaded." end
+
+	local lotId, state = LotService.getPlayerLot(player)
+	if not lotId then return false, "You don't own a casino." end
+
+	LotService.release(lotId)
+	DataManager:AddCash(player, state.sellPrice or 0)
+
+	return true, state.sellPrice
+end
+
+function CasinoService.removeOnLeave(player)
+	local lotId = LotService.getPlayerLot(player)
+	if lotId then LotService.release(lotId) end
+end
+
+return CasinoService
