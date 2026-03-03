@@ -1,0 +1,113 @@
+-- MainServer
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local Players            = game:GetService("Players")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+print("MainServer: Starting up...")
+
+-- Use DataStoreManager as the ONE true data system
+local DataManager = require(ServerScriptService:WaitForChild("DataStoreManager"))
+local Services    = ServerScriptService:WaitForChild("Services")
+local LotService  = require(Services:WaitForChild("LotService"))
+local CasinoService = require(Services:WaitForChild("CasinoService"))
+
+print("MainServer: Modules loaded")
+
+-- Remote Events
+local Events              = ReplicatedStorage:WaitForChild("Events")
+local openRealEstateEvent = Events:WaitForChild("OpenRealEstate")
+local lotDataUpdatedEvent = Events:WaitForChild("LotDataUpdated")
+local purchaseCasinoEvent = Events:WaitForChild("PurchaseCasino")
+local sellCasinoEvent     = Events:WaitForChild("SellCasino")
+local updateCurrencyEvent = Events:WaitForChild("UpdateCurrency")
+
+print("MainServer: Events loaded")
+
+-- Init services
+LotService.init()
+CasinoService.init(LotService, DataManager)
+
+print("MainServer: Services initialized")
+
+-- Helper: push cash to client UI
+local function syncCash(player)
+	local data = DataManager:GetData(player)
+	if data then
+		updateCurrencyEvent:FireClient(player, data.Cash)
+	end
+end
+
+-- ── Player Lifecycle ──────────────────────────────────────────────────────────
+Players.PlayerAdded:Connect(function(player)
+	-- DataStoreManager already handles loading — wait for it
+	local attempts = 0
+	repeat
+		task.wait(0.1)
+		attempts += 1
+	until DataManager:GetData(player) ~= nil or attempts > 50
+
+	syncCash(player)
+	lotDataUpdatedEvent:FireClient(player, LotService.getAllLots(player))
+
+	player.CharacterAdded:Connect(function()
+		syncCash(player)
+	end)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	CasinoService.removeOnLeave(player)
+	-- DataStoreManager handles the actual save
+end)
+
+-- ── Real Estate Agent NPC ─────────────────────────────────────────────────────
+local function setupRealEstateAgent()
+	local agentNPC = workspace:FindFirstChild("Real Estate Agent")
+	if not agentNPC then warn("MainServer: 'Real Estate Agent' not found!") return end
+
+	local hrp = agentNPC:FindFirstChild("HumanoidRootPart")
+	if not hrp then warn("MainServer: No HumanoidRootPart found!") return end
+
+	local prompt = hrp:FindFirstChildOfClass("ProximityPrompt")
+	if not prompt then warn("MainServer: No ProximityPrompt found in HumanoidRootPart!") return end
+
+	prompt.Triggered:Connect(function(player)
+		lotDataUpdatedEvent:FireClient(player, LotService.getAllLots(player))
+		openRealEstateEvent:FireClient(player)
+		print("MainServer: GUI opened for", player.Name)
+	end)
+
+	print("MainServer: ✅ Real Estate Agent ready!")
+end
+
+task.wait(1)
+setupRealEstateAgent()
+
+-- ── Purchase Casino ───────────────────────────────────────────────────────────
+purchaseCasinoEvent.OnServerEvent:Connect(function(player, lotId)
+	local success, result = CasinoService.purchase(player, lotId)
+	if success then
+		DataManager:CheckLevelUp(player)
+		syncCash(player)
+		for _, p in ipairs(Players:GetPlayers()) do
+			lotDataUpdatedEvent:FireClient(p, LotService.getAllLots(p))
+		end
+	else
+		warn("Purchase failed for", player.Name, "—", tostring(result))
+	end
+end)
+
+-- ── Sell Casino ───────────────────────────────────────────────────────────────
+sellCasinoEvent.OnServerEvent:Connect(function(player, lotId)
+	local success, result = CasinoService.sell(player, lotId)
+	if success then
+		DataManager:CheckLevelUp(player)
+		syncCash(player)
+		for _, p in ipairs(Players:GetPlayers()) do
+			lotDataUpdatedEvent:FireClient(p, LotService.getAllLots(p))
+		end
+	else
+		warn("Sell failed for", player.Name, "—", tostring(result))
+	end
+end)
+
+print("MainServer: Script fully loaded ✅")
