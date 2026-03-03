@@ -1,0 +1,40 @@
+-- ============================================================
+--  HUSTLE CITY: Casino Empire
+--  Script: HUDServer (ServerScriptService > Script)
+--  Handles: Sending live stats to each player's HUD
+-- ============================================================
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local DataManager = require(script.Parent.DataStoreManager)
+local Events = ReplicatedStorage:WaitForChild("Events")
+local GetHUDStats = Events:WaitForChild("GetHUDStats")
+
+-- Level min thresholds (must match DataStoreManager)
+local LEVEL_MINS = {0, 500, 2000, 5000, 15000, 35000, 50000, 100000, 250000, 500000, 1000000, 2500000, 5000000, 10000000, 25000000}
+
+GetHUDStats.OnServerInvoke = function(player)
+	local data = DataManager:GetData(player)
+	if not data then return nil end
+
+	local level, title, netWorth, nextMin, needed = DataManager:GetLevelInfo(player)
+
+	-- Also check for level up on every poll
+	DataManager:CheckLevelUp(player)
+
+	local currentLevelMin = LEVEL_MINS[level] or 0
+
+	return {
+		Cash           = data.Cash,
+		NetWorth       = netWorth,
+		Level          = level,
+		Title          = title,
+		NextLevelMin   = nextMin,
+		CurrentLevelMin = currentLevelMin,
+		NeededForNext  = needed,
+		StreetRep      = data.StreetRep,
+		OwnsCasino     = data.OwnsCasino,
+		CasinoName     = data.CasinoName,
+	}
+end
+
+print("[HustleCity] 📊 HUDServer loaded!")
