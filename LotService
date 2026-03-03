@@ -1,0 +1,143 @@
+local LotService = {}
+
+local PRICES = {
+	Blue   = 2500,
+	Yellow = 10000,
+	Pink   = 100000,
+}
+
+local SELL_MULTIPLIER = 0.40
+
+local PLACEHOLDER_COLORS = {
+	Pink   = Color3.fromRGB(255, 130, 180),
+	Yellow = Color3.fromRGB(255, 210, 50),
+	Blue   = Color3.fromRGB(80, 160, 255),
+}
+
+local PLACEHOLDER_SIZES = {
+	Pink   = Vector3.new(40, 20, 40),
+	Yellow = Vector3.new(28, 14, 28),
+	Blue   = Vector3.new(16, 8, 16),
+}
+
+local lotStates = {}
+
+local function getLotCFrame(lot)
+	if lot:IsA("Model") and lot.PrimaryPart then
+		return lot.PrimaryPart.CFrame
+	elseif lot:IsA("BasePart") then
+		return lot.CFrame
+	end
+	return CFrame.new(0, 0, 0)
+end
+
+function LotService.init()
+	local lotsFolder = workspace:FindFirstChild("Lots")
+	if not lotsFolder then
+		warn("[LotService] 'Lots' folder missing from Workspace!")
+		return
+	end
+
+	for _, lot in ipairs(lotsFolder:GetChildren()) do
+		local lotType = lot:GetAttribute("LotType")
+		if not lotType then continue end
+
+		local price = PRICES[lotType]
+
+		lotStates[lot.Name] = {
+			lotId       = lot.Name,
+			lotType     = lotType,
+			price       = price,
+			sellPrice   = price and math.floor(price * SELL_MULTIPLIER),
+			isNPC       = false,
+			ownerId     = nil,
+			ownerName   = nil,
+			casinoModel = nil,
+		}
+	end
+end
+
+function LotService.getState(lotId)
+	return lotStates[lotId]
+end
+
+function LotService.getAllData()
+	local data = {}
+	for lotId, state in pairs(lotStates) do
+		data[lotId] = {
+			lotId       = state.lotId,
+			lotType     = state.lotType,
+			price       = state.price,
+			sellPrice   = state.sellPrice,
+			isNPC       = false,
+			ownerId     = state.ownerId,
+			ownerName   = state.ownerName,
+			isAvailable = state.ownerId == nil,
+		}
+	end
+	return data
+end
+
+function LotService.isAvailable(lotId)
+	local s = lotStates[lotId]
+	return s and s.ownerId == nil
+end
+
+function LotService.isPurchasable(lotId)
+	local s = lotStates[lotId]
+	return s and s.price ~= nil
+end
+
+function LotService.getPlayerLot(player)
+	for lotId, state in pairs(lotStates) do
+		if state.ownerId == player.UserId then
+			return lotId, state
+		end
+	end
+	return nil, nil
+end
+
+function LotService.getLotPart(lotId)
+	local folder = workspace:FindFirstChild("Lots")
+	return folder and folder:FindFirstChild(lotId)
+end
+
+function LotService.claim(player, lotId, casinoModel)
+	local s = lotStates[lotId]
+	if not s then return false end
+	s.ownerId     = player.UserId
+	s.ownerName   = player.Name
+	s.casinoModel = casinoModel
+	return true
+end
+
+function LotService.release(lotId)
+	local s = lotStates[lotId]
+	if not s then return end
+	if s.casinoModel and s.casinoModel.Parent then
+		s.casinoModel:Destroy()
+	end
+	s.ownerId     = nil
+	s.ownerName   = nil
+	s.casinoModel = nil
+end
+
+function LotService.getAllLots(player)
+	local data = {}
+	for lotId, state in pairs(lotStates) do
+		table.insert(data, {
+			lotId       = lotId,
+			lotType     = state.lotType,
+			price       = state.price,
+			sellPrice   = state.sellPrice,
+			ownerId     = state.ownerId and tostring(state.ownerId),
+			ownerName   = state.ownerName,
+			isAvailable = state.ownerId == nil,
+		})
+	end
+	return data
+end
+
+
+
+return LotService
