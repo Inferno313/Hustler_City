@@ -1,0 +1,247 @@
+-- LotService (ModuleScript)
+-- Location: ServerScriptService/Services/LotService
+
+local LotService = {}
+
+-- ─── Lot definitions (hardcoded — lots are direct children of Workspace) ──────
+local LOT_DEFINITIONS = {
+	{ id = "YellowLot1", tier = "Yellow" },
+	{ id = "YellowLot2", tier = "Yellow" },
+	{ id = "YellowLot3", tier = "Yellow" },
+	{ id = "BlueLot1",   tier = "Blue"   },
+	{ id = "BlueLot2",   tier = "Blue"   },
+	{ id = "BlueLot3",   tier = "Blue"   },
+	{ id = "BlueLot4",   tier = "Blue"   },
+	{ id = "PinkLot1",   tier = "Pink"   },
+	{ id = "PinkLot2",   tier = "Pink"   },
+}
+
+local TIER_PRICES = {
+	Yellow = 2500,
+	Blue   = 10000,
+	Pink   = 100000,
+}
+
+-- ─── State ────────────────────────────────────────────────────────────────────
+local lotStates   = {}
+local initialized = false
+
+-- ─── Initialize ───────────────────────────────────────────────────────────────
+local function initializeLots()
+	local found = 0
+	for _, def in ipairs(LOT_DEFINITIONS) do
+		local part = workspace:FindFirstChild(def.id)
+		if part then
+			lotStates[def.id] = {
+				lotType   = def.tier,
+				ownerId   = nil,
+				ownerName = nil,
+				part      = part,
+				casino    = nil,
+			}
+			found += 1
+		else
+			warn("[LotService] ⚠️ '" .. def.id .. "' not found in Workspace!")
+		end
+	end
+	initialized = true
+	print("[LotService] ✅ Initialized — " .. found .. "/" .. #LOT_DEFINITIONS .. " lots found")
+end
+
+function LotService.init()
+	task.spawn(function()
+		task.wait(1)
+		initializeLots()
+	end)
+end
+
+function LotService.waitUntilReady()
+	while not initialized do
+		task.wait(0.1)
+	end
+end
+
+-- ─── Get all lot states (for syncing to clients) ──────────────────────────────
+function LotService.getAllLots()
+	local result = {}
+	for id, state in pairs(lotStates) do
+		table.insert(result, {
+			id        = id,
+			lotType   = state.lotType,
+			tierType  = state.lotType,
+			ownerId   = state.ownerId,
+			ownerName = state.ownerName,
+		})
+	end
+	return result
+end
+
+-- ─── Get lots owned by a specific player ─────────────────────────────────────
+function LotService.getPlayerLots(player)
+	local result = {}
+	local userId = tostring(player.UserId)
+	for id, state in pairs(lotStates) do
+		if tostring(state.ownerId) == userId then
+			table.insert(result, {
+				id        = id,
+				lotType   = state.lotType,
+				tierType  = state.lotType,
+				ownerId   = state.ownerId,
+				ownerName = state.ownerName,
+				part      = state.part,
+			})
+		end
+	end
+	return result
+end
+
+-- ─── Purchase a lot ───────────────────────────────────────────────────────────
+function LotService.purchaseLot(player, lotId, data)
+	-- Enforce 1 lot per player
+	for id, state in pairs(lotStates) do
+		if tostring(state.ownerId) == tostring(player.UserId) then
+			return { success = false, reason = "You already own " .. id .. ". Sell it first before buying another." }
+		end
+	end
+
+	local state = lotStates[lotId]
+	if not state then
+		return { success = false, reason = "Lot '" .. tostring(lotId) .. "' does not exist" }
+	end
+	if state.ownerId ~= nil then
+		return { success = false, reason = "Lot already owned by " .. tostring(state.ownerName) }
+	end
+
+	local price = TIER_PRICES[state.lotType]
+	if not price then
+		return { success = false, reason = "Unknown tier: " .. tostring(state.lotType) }
+	end
+
+	local cash = data.Cash or 0
+	if cash < price then
+		return { success = false, reason = "Not enough cash ($" .. cash .. " < $" .. price .. ")" }
+	end
+
+	-- Deduct cash
+	data.Cash = cash - price
+
+	-- Mark lot as owned
+	state.ownerId   = player.UserId
+	state.ownerName = player.Name
+
+	-- Track in player data
+	if not data.OwnedLots then data.OwnedLots = {} end
+	data.OwnedLots[lotId] = { tier = state.lotType }
+
+	print("[LotService] ✅ " .. player.Name .. " purchased " .. lotId .. " (" .. state.lotType .. ") for $" .. price)
+	return { success = true, lotId = lotId, tier = state.lotType }
+end
+
+-- ─── Sell / release a lot ─────────────────────────────────────────────────────
+function LotService.releaseLot(player, lotId)
+	local state = lotStates[lotId]
+	if not state then
+		return { success = false, reason = "Lot not found" }
+	end
+	if tostring(state.ownerId) ~= tostring(player.UserId) then
+		return { success = false, reason = "You don't own this lot" }
+	end
+
+	state.ownerId   = nil
+	state.ownerName = nil
+	state.casino    = nil
+
+	print("[LotService] 🗑️ " .. player.Name .. " released " .. lotId)
+	return { success = true }
+end
+
+-- ─── Set casino on a lot (called by CasinoService) ────────────────────────────
+function LotService.setCasino(lotId, casinoModel)
+	if lotStates[lotId] then
+		lotStates[lotId].casino = casinoModel
+	end
+end
+
+function LotService.getCasino(lotId)
+	if lotStates[lotId] then
+		return lotStates[lotId].casino
+	end
+	return nil
+end
+
+-- ─── Restore lots from saved player data (called on join) ────────────────────
+function LotService.restorePlayerLots(player, data)
+	if not data.OwnedLots then return end
+	for lotId, lotInfo in pairs(data.OwnedLots) do
+		local state = lotStates[lotId]
+		if state then
+			state.ownerId   = player.UserId
+			state.ownerName = player.Name
+			print("[LotService] ♻️ Restored lot " .. lotId .. " for " .. player.Name)
+		end
+	end
+end
+
+-- ─── Clear lots when player leaves ───────────────────────────────────────────
+function LotService.clearPlayerLots(player)
+	for id, state in pairs(lotStates) do
+		if tostring(state.ownerId) == tostring(player.UserId) then
+			state.ownerId   = nil
+			state.ownerName = nil
+		end
+	end
+end
+
+-- ══════════════════════════════════════════════════════════════════════════════
+-- Methods required by CasinoService
+-- ══════════════════════════════════════════════════════════════════════════════
+
+-- Find first unowned lot of a given tier
+function LotService.findAvailableLot(tier)
+	for id, state in pairs(lotStates) do
+		if state.lotType == tier and state.ownerId == nil then
+			return id, state
+		end
+	end
+	return nil, nil
+end
+
+-- Get the workspace Part/Model for a lot
+function LotService.getLotPart(lotId)
+	local state = lotStates[lotId]
+	return state and state.part or nil
+end
+
+-- Claim a lot for a player and store the casino model reference
+function LotService.claim(player, lotId, casino)
+	local state = lotStates[lotId]
+	if state then
+		state.ownerId   = player.UserId
+		state.ownerName = player.Name
+		state.casino    = casino
+		print("[LotService] 📌 " .. player.Name .. " claimed " .. lotId)
+	end
+end
+
+-- Release a lot by lotId only (no player check — used internally by CasinoService)
+function LotService.release(lotId)
+	local state = lotStates[lotId]
+	if state then
+		state.ownerId   = nil
+		state.ownerName = nil
+		state.casino    = nil
+		print("[LotService] 🔓 Released " .. lotId)
+	end
+end
+
+-- Get the lotId currently owned by a player (nil if none)
+function LotService.getPlayerLotId(player)
+	for id, state in pairs(lotStates) do
+		if tostring(state.ownerId) == tostring(player.UserId) then
+			return id
+		end
+	end
+	return nil
+end
+
+return LotService
