@@ -1,0 +1,240 @@
+-- MainServer (Script)
+-- Location: ServerScriptService/MainServer
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+print("MainServer: Starting up...")
+
+-- ─── Load Modules ─────────────────────────────────────────────────────────────
+local Services    = ServerScriptService:WaitForChild("Services")
+local DataManager = require(ServerScriptService:WaitForChild("DataStoreManager"))
+local LotService  = require(Services:WaitForChild("LotService"))
+local CasinoService = require(Services:WaitForChild("CasinoService"))
+
+print("MainServer: Modules loaded")
+
+-- ─── Load Events ──────────────────────────────────────────────────────────────
+local Events = ReplicatedStorage:WaitForChild("Events")
+
+-- Currency / HUD
+local updateCurrencyEvent  = Events:WaitForChild("UpdateCurrency")
+local levelUpEvent         = Events:WaitForChild("LevelUp")
+
+-- Real Estate
+local openRealEstateEvent  = Events:WaitForChild("OpenRealEstate")
+local syncLotsEvent        = Events:WaitForChild("SyncLots")
+local purchaseLotEvent     = Events:WaitForChild("PurchaseLot")
+local lotDataUpdatedEvent  = Events:WaitForChild("LotDataUpdated")
+
+-- Casino
+local purchaseCasinoEvent  = Events:WaitForChild("PurchaseCasino")
+local sellCasinoEvent      = Events:WaitForChild("SellCasino")
+
+-- RemoteFunctions (use FindFirstChild — these may be outside Events folder)
+local getLotDataFunc  = Events:FindFirstChild("GetLotData")  or ReplicatedStorage:FindFirstChild("GetLotData")
+local getHUDStatsFunc = Events:FindFirstChild("GetHUDStats") or ReplicatedStorage:FindFirstChild("GetHUDStats")
+
+print("MainServer: Events loaded")
+
+-- ─── Init Services ────────────────────────────────────────────────────────────
+LotService.init()
+CasinoService.init(LotService, DataManager)
+
+print("MainServer: Services initialized")
+
+-- ─── Helper: sync cash to a player's HUD ─────────────────────────────────────
+local function syncCash(player)
+	local data = DataManager:GetData(player)
+	if not data then return end
+	updateCurrencyEvent:FireClient(player, data.Cash or 0)
+end
+
+-- ─── Helper: sync all lot states to a specific player ────────────────────────
+local function syncLots(player)
+	local allLots = LotService.getAllLots()
+	syncLotsEvent:FireClient(player, allLots)
+end
+
+-- ─── Helper: sync lots to ALL players (e.g. after a purchase) ────────────────
+local function syncLotsAll()
+	local allLots = LotService.getAllLots()
+	for _, player in ipairs(Players:GetPlayers()) do
+		syncLotsEvent:FireClient(player, allLots)
+	end
+end
+
+-- ─── Player Added ─────────────────────────────────────────────────────────────
+Players.PlayerAdded:Connect(function(player)
+	-- Wait for DataManager to load this player's data
+	local attempts = 0
+	repeat
+		task.wait(0.1)
+		attempts += 1
+	until DataManager:GetData(player) ~= nil or attempts > 50
+
+	-- Wait for LotService to be ready
+	LotService.waitUntilReady()
+
+	-- Restore their owned lots in LotService state
+	local data = DataManager:GetData(player)
+	if data then
+		LotService.restorePlayerLots(player, data)
+	end
+
+	-- Restore their casino buildings on the map
+	CasinoService.restoreOnJoin(player)
+
+	-- Sync HUD
+	syncCash(player)
+	syncLots(player)
+
+	print("[MainServer] 👤 " .. player.Name .. " fully loaded")
+end)
+
+-- ─── Player Removing ──────────────────────────────────────────────────────────
+Players.PlayerRemoving:Connect(function(player)
+	DataManager:SaveOnLeave(player)
+	-- Note: lots stay claimed even after player leaves (casino persists)
+end)
+
+-- ─── Real Estate: ProximityPrompt (SERVER-SIDE) ───────────────────────────────
+task.spawn(function()
+	task.wait(3)
+
+	local npc = workspace:FindFirstChild("Real Estate Agent")
+	if not npc then
+		for _, obj in ipairs(workspace:GetDescendants()) do
+			if obj.Name == "Real Estate Agent" then
+				npc = obj
+				break
+			end
+		end
+	end
+
+	if not npc then
+		warn("[MainServer] ❌ Real Estate Agent NPC not found!")
+		return
+	end
+
+	local prompt = npc:FindFirstChildWhichIsA("ProximityPrompt", true)
+	if not prompt then
+		warn("[MainServer] ❌ No ProximityPrompt on Real Estate Agent!")
+		return
+	end
+
+	print("[MainServer] ✅ Real Estate ProximityPrompt connected: " .. prompt:GetFullName())
+
+	prompt.Triggered:Connect(function(player)
+		print("[MainServer] 🔑 " .. player.Name .. " triggered Real Estate Agent")
+		LotService.waitUntilReady()
+		syncLots(player)
+		openRealEstateEvent:FireClient(player)
+	end)
+end)
+
+-- ─── Real Estate: Purchase Lot ────────────────────────────────────────────────
+purchaseLotEvent.OnServerEvent:Connect(function(player, lotId)
+	print("[MainServer] 🛒 " .. player.Name .. " purchasing lot: " .. tostring(lotId))
+	LotService.waitUntilReady()
+
+	local data = DataManager:GetData(player)
+	if not data then
+		warn("[MainServer] ❌ No data for " .. player.Name)
+		return
+	end
+
+	local result = LotService.purchaseLot(player, lotId, data)
+	if result.success then
+		-- Save data — try multiple possible method names; auto-save also handles this
+		pcall(function()
+			if DataManager.SaveData then DataManager:SaveData(player, data)
+			elseif DataManager.Save   then DataManager:Save(player)
+			end
+		end)
+		syncCash(player)
+		syncLotsAll()
+		CasinoService.spawnCasino(player, lotId, result.tier)
+		print("[MainServer] ✅ " .. player.Name .. " purchased " .. lotId)
+	else
+		warn("[MainServer] ❌ Purchase failed: " .. tostring(result.reason))
+		-- Notify client so they can re-enable the button
+		syncLotsEvent:FireClient(player, LotService.getAllLots())
+	end
+end)
+
+-- ─── Real Estate: Sell Lot (40% refund) ──────────────────────────────────────
+local LOT_SELL_REFUND = { Yellow = 2500 * 0.4, Blue = 10000 * 0.4, Pink = 100000 * 0.4 }
+
+sellCasinoEvent.OnServerEvent:Connect(function(player, lotId)
+	print("[MainServer] 💸 " .. player.Name .. " selling lot: " .. tostring(lotId))
+	LotService.waitUntilReady()
+
+	local data = DataManager:GetData(player)
+	if not data then return end
+
+	local playerLots = LotService.getPlayerLots(player)
+	local ownedLot = nil
+	for _, lot in ipairs(playerLots) do
+		if lot.id == lotId then ownedLot = lot break end
+	end
+
+	if not ownedLot then
+		warn("[MainServer] ❌ " .. player.Name .. " doesn't own lot: " .. tostring(lotId))
+		return
+	end
+
+	-- Give 40% refund
+	local refund = LOT_SELL_REFUND[ownedLot.lotType] or 0
+	data.Cash = (data.Cash or 0) + refund
+
+	-- Remove casino model from the map
+	local casino = LotService.getCasino(lotId)
+	if casino and casino.Parent then
+		casino:Destroy()
+	end
+	LotService.setCasino(lotId, nil)
+
+	-- Release the lot
+	LotService.releaseLot(player, lotId)
+
+	-- Clear from saved data
+	if data.OwnedLots then data.OwnedLots[lotId] = nil end
+
+	pcall(function()
+		if DataManager.SaveData then DataManager:SaveData(player, data)
+		elseif DataManager.Save   then DataManager:Save(player)
+		end
+	end)
+
+	syncCash(player)
+	syncLotsAll()
+	print("[MainServer] ✅ " .. player.Name .. " sold " .. lotId .. " for $" .. refund)
+end)
+
+-- ─── Real Estate: Get Lot Data (RemoteFunction) ───────────────────────────────
+if getLotDataFunc then
+	getLotDataFunc.OnServerInvoke = function(player)
+		LotService.waitUntilReady()
+		return LotService.getAllLots()
+	end
+end
+
+-- (sellCasinoEvent handler is above — handles lot sell with 40% refund)
+
+-- ─── HUD Stats (RemoteFunction) ───────────────────────────────────────────────
+if getHUDStatsFunc then
+	getHUDStatsFunc.OnServerInvoke = function(player)
+		local data = DataManager:GetData(player)
+		if not data then return {} end
+		return {
+			Cash        = data.Cash or 0,
+			TotalEarned = data.TotalEarned or 0,
+			NetWorth    = DataManager:getNetWorth(player),
+			Level       = DataManager:getLevel(player),
+		}
+	end
+end
+
+print("MainServer: Ready!")
