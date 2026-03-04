@@ -1,0 +1,407 @@
+-- RealEstateClient (LocalScript)
+-- Location: StarterGui > RealEstateGui > RealEstateClient
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService      = game:GetService("TweenService")
+local RunService        = game:GetService("RunService")
+
+local player    = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- ─── Events ───────────────────────────────────────────────────────────────────
+local Events              = ReplicatedStorage:WaitForChild("Events", 10)
+local openRealEstateEvent = Events:WaitForChild("OpenRealEstate", 10)
+local purchaseLotEvent    = Events:WaitForChild("PurchaseLot",    10)
+local syncLotsEvent       = Events:WaitForChild("SyncLots",       10)
+local sellCasinoEvent     = Events:WaitForChild("SellCasino",     10)
+
+if not openRealEstateEvent then warn("[RealEstateClient] ❌ OpenRealEstate not found!") return end
+
+-- ─── Constants ────────────────────────────────────────────────────────────────
+local TIER = {
+	Yellow = { price = 2500,   sell = 1000,  color = Color3.fromRGB(220, 170, 0),  dark = Color3.fromRGB(100, 75, 0),  label = "Yellow Casino", icon = "🟡" },
+	Blue   = { price = 10000,  sell = 4000,  color = Color3.fromRGB(30,  120, 220), dark = Color3.fromRGB(10, 50, 100), label = "Blue Casino",   icon = "🔵" },
+	Pink   = { price = 100000, sell = 40000, color = Color3.fromRGB(220, 80,  160), dark = Color3.fromRGB(100, 20, 70), label = "Pink Casino",   icon = "🩷" },
+}
+
+local BG      = Color3.fromRGB(15,  15,  22)
+local CARD_BG = Color3.fromRGB(28,  28,  40)
+local TEXT    = Color3.fromRGB(240, 240, 255)
+local MUTED   = Color3.fromRGB(140, 140, 165)
+local GREEN   = Color3.fromRGB(40,  180, 80)
+local RED     = Color3.fromRGB(220, 50,  60)
+
+local function fmt(n)
+	if n >= 1e6 then return "$" .. string.format("%.1fM", n/1e6) end
+	if n >= 1e3 then return "$" .. string.format("%.1fK", n/1e3) end
+	return "$" .. tostring(n)
+end
+
+local function corner(parent, r)
+	local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r or 10); c.Parent = parent
+end
+local function padding(parent, px)
+	local p = Instance.new("UIPadding")
+	p.PaddingTop    = UDim.new(0, px); p.PaddingBottom = UDim.new(0, px)
+	p.PaddingLeft   = UDim.new(0, px); p.PaddingRight  = UDim.new(0, px)
+	p.Parent = parent
+end
+local function label(parent, text, size, color, bold, xa)
+	local l = Instance.new("TextLabel")
+	l.BackgroundTransparency = 1; l.TextScaled = true
+	l.Text = text; l.TextColor3 = color or TEXT
+	l.Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham
+	l.TextXAlignment = xa or Enum.TextXAlignment.Left
+	l.Size = size; l.Parent = parent
+	return l
+end
+
+-- ─── Build GUI ────────────────────────────────────────────────────────────────
+local RealEstateGui = playerGui:WaitForChild("RealEstateGui", 15)
+if not RealEstateGui then warn("[RealEstateClient] ❌ RealEstateGui not found!") return end
+
+-- Remove any existing MainFrame so we build fresh
+local old = RealEstateGui:FindFirstChild("MainFrame")
+if old then old:Destroy() end
+
+-- Outer panel
+local Panel = Instance.new("Frame")
+Panel.Name = "MainFrame"
+Panel.Size = UDim2.new(0, 440, 0, 560)
+Panel.Position = UDim2.new(0.5, -220, 0.5, -280)
+Panel.BackgroundColor3 = BG
+Panel.BorderSizePixel = 0
+Panel.Visible = false
+Panel.ClipsDescendants = true
+Panel.Parent = RealEstateGui
+corner(Panel, 16)
+
+-- Drop shadow (fake via a slightly larger dark frame behind)
+local shadow = Instance.new("Frame")
+shadow.Size = UDim2.new(1, 12, 1, 12)
+shadow.Position = UDim2.new(0, -6, 0, 4)
+shadow.BackgroundColor3 = Color3.fromRGB(0,0,0)
+shadow.BackgroundTransparency = 0.55
+shadow.BorderSizePixel = 0
+shadow.ZIndex = Panel.ZIndex - 1
+shadow.Parent = RealEstateGui
+corner(shadow, 18)
+-- hide shadow when panel hides
+Panel:GetPropertyChangedSignal("Visible"):Connect(function()
+	shadow.Visible = Panel.Visible
+end)
+shadow.Visible = false
+
+-- ── Header bar ────────────────────────────────────────────────────────────────
+local Header = Instance.new("Frame")
+Header.Size = UDim2.new(1, 0, 0, 64)
+Header.Position = UDim2.new(0,0,0,0)
+Header.BackgroundColor3 = Color3.fromRGB(22, 22, 34)
+Header.BorderSizePixel = 0
+Header.Parent = Panel
+
+local titleLbl = label(Header, "🏗️  Real Estate Office", UDim2.new(1,-55,0,36), TEXT, true)
+titleLbl.Position = UDim2.new(0, 16, 0, 8)
+titleLbl.TextSize = 18
+
+local cashLbl = label(Header, "$0", UDim2.new(1,-55,0,20), Color3.fromRGB(80,220,100), true)
+cashLbl.Position = UDim2.new(0, 16, 0, 40)
+cashLbl.TextSize = 14
+cashLbl.TextXAlignment = Enum.TextXAlignment.Left
+
+-- Close button
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 36, 0, 36)
+CloseBtn.Position = UDim2.new(1, -46, 0, 14)
+CloseBtn.BackgroundColor3 = RED
+CloseBtn.TextColor3 = TEXT
+CloseBtn.Text = "✕"
+CloseBtn.TextScaled = true
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.BorderSizePixel = 0
+CloseBtn.Parent = Header
+corner(CloseBtn, 8)
+CloseBtn.MouseButton1Click:Connect(function()
+	Panel.Visible = false
+end)
+
+-- ── Scroll area for lot cards ──────────────────────────────────────────────────
+local ScrollFrame = Instance.new("ScrollingFrame")
+ScrollFrame.Size = UDim2.new(1, 0, 1, -64)
+ScrollFrame.Position = UDim2.new(0, 0, 0, 64)
+ScrollFrame.BackgroundTransparency = 1
+ScrollFrame.BorderSizePixel = 0
+ScrollFrame.ScrollBarThickness = 4
+ScrollFrame.ScrollBarImageColor3 = Color3.fromRGB(80,80,120)
+ScrollFrame.CanvasSize = UDim2.new(0,0,0,0)
+ScrollFrame.Parent = Panel
+
+local ListLayout = Instance.new("UIListLayout")
+ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+ListLayout.Padding = UDim.new(0, 8)
+ListLayout.Parent = ScrollFrame
+
+local ScrollPad = Instance.new("UIPadding")
+ScrollPad.PaddingLeft   = UDim.new(0,12)
+ScrollPad.PaddingRight  = UDim.new(0,12)
+ScrollPad.PaddingTop    = UDim.new(0,12)
+ScrollPad.PaddingBottom = UDim.new(0,12)
+ScrollPad.Parent = ScrollFrame
+
+-- Auto-resize canvas
+ListLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+	ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, ListLayout.AbsoluteContentSize.Y + 24)
+end)
+
+-- ─── State ────────────────────────────────────────────────────────────────────
+local lotData   = {}
+local playerCash = 0
+
+-- ─── Build a section header ───────────────────────────────────────────────────
+local function makeSectionHeader(text, order)
+	local f = Instance.new("Frame")
+	f.Size = UDim2.new(1, 0, 0, 28)
+	f.BackgroundTransparency = 1
+	f.LayoutOrder = order
+	f.Parent = ScrollFrame
+	label(f, text, UDim2.new(1,0,1,0), MUTED, false).TextSize = 12
+	return f
+end
+
+-- ─── Build a lot card ─────────────────────────────────────────────────────────
+local function makeLotCard(lotId, info, order, isMyLot)
+	local tier  = info.tierType or info.lotType or "Yellow"
+	local ti    = TIER[tier] or TIER.Yellow
+	local owned = info.ownerId ~= nil
+	local mine  = tostring(info.ownerId) == tostring(player.UserId)
+
+	local card = Instance.new("Frame")
+	card.Name = "LotCard_" .. lotId
+	card.Size = UDim2.new(1, 0, 0, 72)
+	card.BackgroundColor3 = CARD_BG
+	card.BorderSizePixel = 0
+	card.LayoutOrder = order
+	card.Parent = ScrollFrame
+	corner(card, 10)
+
+	-- Left accent bar
+	local accent = Instance.new("Frame")
+	accent.Size = UDim2.new(0, 5, 1, 0)
+	accent.BackgroundColor3 = ti.color
+	accent.BorderSizePixel = 0
+	accent.Parent = card
+	corner(accent, 3)
+
+	-- Tier icon + lot name
+	local nameLbl = label(card, ti.icon .. "  " .. lotId, UDim2.new(0.55, -10, 0, 24), TEXT, true)
+	nameLbl.Position = UDim2.new(0, 18, 0, 10)
+	nameLbl.TextSize = 15
+
+	-- Sub-label
+	local subLbl
+	if mine then
+		subLbl = label(card, "✅ Owned by you", UDim2.new(0.55, -10, 0, 18), Color3.fromRGB(80,210,100), false)
+	elseif owned then
+		subLbl = label(card, "❌ " .. tostring(info.ownerName or "Another player"), UDim2.new(0.55,-10,0,18), Color3.fromRGB(200,80,80), false)
+	else
+		subLbl = label(card, ti.label .. "  •  " .. fmt(ti.price), UDim2.new(0.55,-10,0,18), MUTED, false)
+	end
+	subLbl.Position = UDim2.new(0, 18, 0, 38)
+	subLbl.TextSize = 12
+
+	-- Action button
+	if mine then
+		-- SELL button
+		local sellBtn = Instance.new("TextButton")
+		sellBtn.Size = UDim2.new(0, 120, 0, 40)
+		sellBtn.Position = UDim2.new(1, -134, 0.5, -20)
+		sellBtn.BackgroundColor3 = RED
+		sellBtn.TextColor3 = TEXT
+		sellBtn.Text = "SELL  " .. fmt(ti.sell)
+		sellBtn.TextScaled = true
+		sellBtn.Font = Enum.Font.GothamBold
+		sellBtn.BorderSizePixel = 0
+		sellBtn.Parent = card
+		corner(sellBtn, 8)
+
+		sellBtn.MouseButton1Click:Connect(function()
+			print("[RealEstateClient] 💸 Selling: " .. lotId)
+			if sellCasinoEvent then
+				sellCasinoEvent:FireServer(lotId)
+			end
+			sellBtn.Text = "..."
+			sellBtn.BackgroundColor3 = Color3.fromRGB(80,80,80)
+			sellBtn.Active = false
+		end)
+	elseif not owned then
+		-- BUY button (greyed if can't afford)
+		local canAfford = playerCash >= ti.price
+		local buyBtn = Instance.new("TextButton")
+		buyBtn.Size = UDim2.new(0, 110, 0, 40)
+		buyBtn.Position = UDim2.new(1, -124, 0.5, -20)
+		buyBtn.BackgroundColor3 = canAfford and GREEN or Color3.fromRGB(60,60,60)
+		buyBtn.TextColor3 = canAfford and TEXT or Color3.fromRGB(120,120,120)
+		buyBtn.Text = canAfford and "BUY" or "💸 " .. fmt(ti.price)
+		buyBtn.TextScaled = true
+		buyBtn.Font = Enum.Font.GothamBold
+		buyBtn.BorderSizePixel = 0
+		buyBtn.Active = canAfford
+		buyBtn.Parent = card
+		corner(buyBtn, 8)
+
+		if canAfford then
+			buyBtn.MouseButton1Click:Connect(function()
+				print("[RealEstateClient] 🛒 Buying: " .. lotId)
+				if purchaseLotEvent then purchaseLotEvent:FireServer(lotId) end
+				buyBtn.Text = "..."
+				buyBtn.BackgroundColor3 = Color3.fromRGB(60,60,80)
+				buyBtn.Active = false
+			end)
+		end
+	end
+
+	return card
+end
+
+-- ─── Refresh the whole menu ───────────────────────────────────────────────────
+local function refreshMenu()
+	-- Clear all cards and headers
+	for _, ch in ipairs(ScrollFrame:GetChildren()) do
+		if ch:IsA("Frame") or ch:IsA("TextLabel") then ch:Destroy() end
+	end
+
+	-- Sort lots
+	local myLot       = nil
+	local available   = { Yellow={}, Blue={}, Pink={} }
+	local takenByOther = {}
+
+	for id, info in pairs(lotData) do
+		local mine = tostring(info.ownerId) == tostring(player.UserId)
+		if mine then
+			myLot = { id=id, info=info }
+		elseif info.ownerId ~= nil then
+			table.insert(takenByOther, { id=id, info=info })
+		else
+			local tier = info.tierType or info.lotType or "Yellow"
+			if available[tier] then
+				table.insert(available[tier], { id=id, info=info })
+			end
+		end
+	end
+
+	-- Sort each available tier bucket alphabetically
+	for _, bucket in pairs(available) do
+		table.sort(bucket, function(a,b) return a.id < b.id end)
+	end
+
+	local order = 1
+
+	-- ── My Lot section ────────────────────────────────────────────────────────
+	if myLot then
+		makeSectionHeader("YOUR LOT", order); order += 1
+		makeLotCard(myLot.id, myLot.info, order, true); order += 1
+
+		-- Separator
+		local sep = Instance.new("Frame")
+		sep.Size = UDim2.new(1,0,0,1)
+		sep.BackgroundColor3 = Color3.fromRGB(40,40,60)
+		sep.BorderSizePixel = 0
+		sep.LayoutOrder = order; order += 1
+		sep.Parent = ScrollFrame
+
+		makeSectionHeader("AVAILABLE LOTS", order); order += 1
+	else
+		makeSectionHeader("AVAILABLE LOTS  —  own 1 at a time", order); order += 1
+	end
+
+	-- ── Available lots by tier ─────────────────────────────────────────────────
+	local tierOrder = {"Yellow","Blue","Pink"}
+	local anyAvailable = false
+
+	for _, tier in ipairs(tierOrder) do
+		local bucket = available[tier]
+		if #bucket > 0 then
+			anyAvailable = true
+			for _, entry in ipairs(bucket) do
+				makeLotCard(entry.id, entry.info, order, false)
+				order += 1
+			end
+		end
+	end
+
+	if not anyAvailable and not myLot then
+		-- All lots taken
+		local empty = Instance.new("TextLabel")
+		empty.Size = UDim2.new(1,0,0,60)
+		empty.BackgroundTransparency = 1
+		empty.TextColor3 = MUTED
+		empty.Text = "All lots are currently owned."
+		empty.TextScaled = true
+		empty.Font = Enum.Font.Gotham
+		empty.LayoutOrder = order
+		empty.Parent = ScrollFrame
+	end
+
+	-- ── Taken by others (collapsed at bottom) ─────────────────────────────────
+	if #takenByOther > 0 then
+		local sep2 = Instance.new("Frame")
+		sep2.Size = UDim2.new(1,0,0,1)
+		sep2.BackgroundColor3 = Color3.fromRGB(40,40,60)
+		sep2.BorderSizePixel = 0
+		sep2.LayoutOrder = order; order += 1
+		sep2.Parent = ScrollFrame
+
+		makeSectionHeader("OWNED BY OTHERS", order); order += 1
+		for _, entry in ipairs(takenByOther) do
+			makeLotCard(entry.id, entry.info, order, false)
+			order += 1
+		end
+	end
+end
+
+-- ─── Listen: server opens menu ────────────────────────────────────────────────
+openRealEstateEvent.OnClientEvent:Connect(function()
+	-- Update cash display from character
+	local data = player:FindFirstChild("leaderstats")
+	-- Try to pull from a cash value if it exists
+	local cashVal = player:FindFirstChild("Cash") or (player:FindFirstChild("leaderstats") and player.leaderstats:FindFirstChild("Cash"))
+	if cashVal then playerCash = cashVal.Value end
+
+	refreshMenu()
+
+	-- Tween in
+	Panel.Visible = true
+	Panel.Size = UDim2.new(0, 440, 0, 10)
+	Panel.Position = UDim2.new(0.5, -220, 0.5, -5)
+	local tween = TweenService:Create(Panel,
+		TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+		{ Size = UDim2.new(0, 440, 0, 560), Position = UDim2.new(0.5, -220, 0.5, -280) }
+	)
+	tween:Play()
+end)
+
+-- ─── Listen: lot data sync ────────────────────────────────────────────────────
+if syncLotsEvent then
+	syncLotsEvent.OnClientEvent:Connect(function(data)
+		lotData = {}
+		if type(data) == "table" then
+			for _, lot in ipairs(data) do
+				if lot.id then lotData[lot.id] = lot end
+			end
+		end
+		if Panel.Visible then refreshMenu() end
+	end)
+end
+
+-- ─── Track cash via UpdateCurrency event ─────────────────────────────────────
+local updateCurrencyEvent = Events:FindFirstChild("UpdateCurrency")
+if updateCurrencyEvent then
+	updateCurrencyEvent.OnClientEvent:Connect(function(cash)
+		playerCash = cash or 0
+		cashLbl.Text = fmt(playerCash)
+		if Panel.Visible then refreshMenu() end
+	end)
+end
+
+print("[RealEstateClient] ✅ Ready — CLIENT ✅")
