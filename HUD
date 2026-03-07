@@ -1,0 +1,301 @@
+-- ============================================================
+--  HUSTLE CITY: Casino Empire
+--  Script: HUD (LocalScript inside StarterGui)
+--  Overhead tag: brainrot-style big green text
+-- ============================================================
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local player = Players.LocalPlayer
+local Events = ReplicatedStorage:WaitForChild("Events")
+local LevelUp = Events:WaitForChild("LevelUp")
+local GetHUDStats = Events:WaitForChild("GetHUDStats")
+-- ============================================================
+-- HELPERS
+-- ============================================================
+local function formatCash(n)
+	if n >= 1000000 then return string.format("$%.2fM", n / 1000000)
+	elseif n >= 1000 then return string.format("$%.1fK", n / 1000)
+	else return "$" .. tostring(math.floor(n)) end
+end
+local function corner(parent, radius)
+	Instance.new("UICorner", parent).CornerRadius = UDim.new(0, radius or 10)
+end
+local function stroke(parent, color, thickness)
+	local s = Instance.new("UIStroke", parent)
+	s.Color = color
+	s.Thickness = thickness or 1.5
+	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+end
+-- ============================================================
+-- SCREEN GUI
+-- ============================================================
+local gui = Instance.new("ScreenGui")
+gui.Name = "HustleCityHUD"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = player.PlayerGui
+-- ============================================================
+-- BOTTOM-LEFT CASH CARD
+-- ============================================================
+local cashCard = Instance.new("Frame", gui)
+cashCard.Size = UDim2.new(0, 180, 0, 64)
+cashCard.Position = UDim2.new(0, 16, 1, -86)
+cashCard.BackgroundColor3 = Color3.fromRGB(8, 5, 16)
+cashCard.BorderSizePixel = 0
+cashCard.ZIndex = 10
+corner(cashCard, 14)
+stroke(cashCard, Color3.fromRGB(160, 110, 10), 1.5)
+local cardAccent = Instance.new("Frame", cashCard)
+cardAccent.Size = UDim2.new(1, 0, 0, 3)
+cardAccent.BackgroundColor3 = Color3.fromRGB(255, 180, 20)
+cardAccent.BorderSizePixel = 0
+cardAccent.ZIndex = 11
+corner(cardAccent, 3)
+local accentGrad = Instance.new("UIGradient", cardAccent)
+accentGrad.Color = ColorSequence.new(Color3.fromRGB(255, 77, 166), Color3.fromRGB(255, 210, 40))
+accentGrad.Rotation = 0
+local cashLabel = Instance.new("TextLabel", cashCard)
+cashLabel.Size = UDim2.new(1, -14, 0, 18)
+cashLabel.Position = UDim2.new(0, 12, 0, 8)
+cashLabel.BackgroundTransparency = 1
+cashLabel.Text = "CASH"
+cashLabel.Font = Enum.Font.GothamBold
+cashLabel.TextSize = 10
+cashLabel.TextColor3 = Color3.fromRGB(150, 120, 60)
+cashLabel.TextXAlignment = Enum.TextXAlignment.Left
+cashLabel.ZIndex = 11
+local cashAmount = Instance.new("TextLabel", cashCard)
+cashAmount.Name = "CashAmount"
+cashAmount.Size = UDim2.new(1, -14, 0, 30)
+cashAmount.Position = UDim2.new(0, 8, 0, 26)
+cashAmount.BackgroundTransparency = 1
+cashAmount.Text = "..."        -- FIX: no hardcoded $100
+cashAmount.Font = Enum.Font.GothamBold
+cashAmount.TextSize = 26
+cashAmount.TextColor3 = Color3.fromRGB(255, 215, 50)
+cashAmount.TextXAlignment = Enum.TextXAlignment.Left
+cashAmount.ZIndex = 11
+-- Progress bar above card
+local progressBg = Instance.new("Frame", gui)
+progressBg.Size = UDim2.new(0, 180, 0, 4)
+progressBg.Position = UDim2.new(0, 16, 1, -92)
+progressBg.BackgroundColor3 = Color3.fromRGB(25, 15, 40)
+progressBg.BorderSizePixel = 0
+progressBg.ZIndex = 9
+corner(progressBg, 4)
+local progressFill = Instance.new("Frame", progressBg)
+progressFill.Size = UDim2.new(0.01, 0, 1, 0)
+progressFill.BackgroundColor3 = Color3.fromRGB(255, 107, 53)
+progressFill.BorderSizePixel = 0
+progressFill.ZIndex = 10
+corner(progressFill, 4)
+local progGrad = Instance.new("UIGradient", progressFill)
+progGrad.Color = ColorSequence.new(Color3.fromRGB(255, 77, 166), Color3.fromRGB(255, 210, 60))
+progGrad.Rotation = 0
+local levelLabel = Instance.new("TextLabel", gui)
+levelLabel.Size = UDim2.new(0, 180, 0, 16)
+levelLabel.Position = UDim2.new(0, 16, 1, -110)
+levelLabel.BackgroundTransparency = 1
+levelLabel.Text = "Level 1  ·  Broke Bum"
+levelLabel.Font = Enum.Font.GothamBold
+levelLabel.TextSize = 11
+levelLabel.TextColor3 = Color3.fromRGB(170, 140, 220)
+levelLabel.TextXAlignment = Enum.TextXAlignment.Left
+levelLabel.ZIndex = 10
+-- ============================================================
+-- CASH CHANGE POPUP
+-- ============================================================
+local lastCash = nil   -- FIX: nil = not yet loaded, skips popup on first refresh
+local function showCashChange(amount)
+	if amount == 0 or lastCash == nil then return end   -- FIX: skip on first load
+	local popup = Instance.new("TextLabel", gui)
+	popup.Size = UDim2.new(0, 140, 0, 24)
+	popup.Position = UDim2.new(0, 16, 1, -118)
+	popup.BackgroundTransparency = 1
+	popup.Text = (amount > 0 and "+" or "") .. formatCash(amount)
+	popup.Font = Enum.Font.GothamBold
+	popup.TextSize = 16
+	popup.TextColor3 = amount > 0 and Color3.fromRGB(60, 220, 110) or Color3.fromRGB(255, 80, 80)
+	popup.TextXAlignment = Enum.TextXAlignment.Left
+	popup.ZIndex = 20
+	TweenService:Create(popup,
+		TweenInfo.new(1.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{ Position = UDim2.new(0, 16, 1, -160), TextTransparency = 1 }
+	):Play()
+	task.delay(1.5, function() popup:Destroy() end)
+end
+-- ============================================================
+-- LEVEL UP BANNER
+-- ============================================================
+local banner = Instance.new("Frame", gui)
+banner.Size = UDim2.new(0, 340, 0, 72)
+banner.Position = UDim2.new(0.5, -170, 0, -80)
+banner.BackgroundColor3 = Color3.fromRGB(10, 5, 22)
+banner.BorderSizePixel = 0
+banner.ZIndex = 50
+banner.Visible = false
+corner(banner, 14)
+stroke(banner, Color3.fromRGB(255, 195, 30), 2)
+local bannerGrad = Instance.new("UIGradient", banner)
+bannerGrad.Color = ColorSequence.new(Color3.fromRGB(45, 10, 75), Color3.fromRGB(18, 5, 38))
+bannerGrad.Rotation = 135
+local bannerTop = Instance.new("TextLabel", banner)
+bannerTop.Size = UDim2.new(1, 0, 0.52, 0)
+bannerTop.BackgroundTransparency = 1
+bannerTop.Text = "⭐  LEVEL UP!  ⭐"
+bannerTop.Font = Enum.Font.GothamBold
+bannerTop.TextSize = 21
+bannerTop.TextColor3 = Color3.fromRGB(255, 215, 50)
+bannerTop.ZIndex = 51
+local bannerSub = Instance.new("TextLabel", banner)
+bannerSub.Size = UDim2.new(1, 0, 0.45, 0)
+bannerSub.Position = UDim2.new(0, 0, 0.53, 0)
+bannerSub.BackgroundTransparency = 1
+bannerSub.Text = "You are now a Street Rookie"
+bannerSub.Font = Enum.Font.Gotham
+bannerSub.TextSize = 13
+bannerSub.TextColor3 = Color3.fromRGB(210, 175, 255)
+bannerSub.ZIndex = 51
+local function showLevelUpBanner(title)
+	bannerSub.Text = "You are now a " .. title
+	banner.Visible = true
+	banner.Position = UDim2.new(0.5, -170, 0, -80)
+	TweenService:Create(banner,
+		TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+		{ Position = UDim2.new(0.5, -170, 0, 62) }
+	):Play()
+	task.delay(3.5, function()
+		TweenService:Create(banner,
+			TweenInfo.new(0.3, Enum.EasingStyle.Quad),
+			{ Position = UDim2.new(0.5, -170, 0, -80) }
+		):Play()
+		task.delay(0.35, function() banner.Visible = false end)
+	end)
+end
+-- ============================================================
+-- OVERHEAD TAG — brainrot style (big green text, no background)
+-- ============================================================
+local currentTitle = "Broke Bum"
+local currentLevel = 1
+local function setupOverheadTag(character, title, lvl)
+	local old = character:FindFirstChild("HustleTag")
+	if old then old:Destroy() end
+	local head = character:WaitForChild("Head", 5)
+	if not head then return end
+	local billboard = Instance.new("BillboardGui")
+	billboard.Name = "HustleTag"
+	billboard.Adornee = head
+	billboard.Size = UDim2.new(0, 220, 0, 50)
+	billboard.StudsOffset = Vector3.new(0, 2.2, 0)
+	billboard.AlwaysOnTop = false
+	billboard.MaxDistance = 60
+	billboard.ResetOnSpawn = false
+	billboard.Parent = character
+	local nameText = Instance.new("TextLabel", billboard)
+	nameText.Size = UDim2.new(1, 0, 0.54, 0)
+	nameText.Position = UDim2.new(0, 0, 0, 0)
+	nameText.BackgroundTransparency = 1
+	nameText.Text = player.Name
+	nameText.Font = Enum.Font.GothamBold
+	nameText.TextSize = 20
+	nameText.TextColor3 = Color3.fromRGB(255, 255, 255)
+	nameText.TextStrokeTransparency = 0
+	nameText.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+	nameText.TextScaled = false
+	local titleText = Instance.new("TextLabel", billboard)
+	titleText.Name = "TitleText"
+	titleText.Size = UDim2.new(1, 0, 0.44, 0)
+	titleText.Position = UDim2.new(0, 0, 0.54, 0)
+	titleText.BackgroundTransparency = 1
+	titleText.Text = "⭐ " .. title
+	titleText.Font = Enum.Font.GothamBold
+	titleText.TextSize = 16
+	titleText.TextColor3 = Color3.fromRGB(0, 255, 100)
+	titleText.TextStrokeTransparency = 0
+	titleText.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+	titleText.TextScaled = false
+end
+-- ============================================================
+-- UPDATE JUST THE TITLE TEXT
+-- ============================================================
+local function updateOverheadTitle(character, title)
+	local billboard = character:FindFirstChild("HustleTag")
+	if not billboard then return end
+	local titleText = billboard:FindFirstChild("TitleText")
+	if titleText then
+		titleText.Text = "⭐ " .. title
+	end
+end
+-- ============================================================
+-- REFRESH HUD
+-- ============================================================
+local function refreshHUD()
+	local ok, stats = pcall(function()
+		return GetHUDStats:InvokeServer()
+	end)
+	-- FIX: retry after 1s if server isn't ready yet instead of silently giving up
+	if not ok or not stats then
+		task.delay(1, refreshHUD)
+		return
+	end
+
+	local newText = formatCash(stats.Cash)
+	if lastCash == nil then
+		-- FIX: first successful load — set display silently with no popup
+		lastCash = stats.Cash
+		cashAmount.Text = newText
+	elseif cashAmount.Text ~= newText then
+		showCashChange(stats.Cash - lastCash)
+		lastCash = stats.Cash
+		cashAmount.Text = newText
+	end
+
+	levelLabel.Text = "Level " .. stats.Level .. "  ·  " .. stats.Title
+	local lo = stats.CurrentLevelMin or 0
+	local hi = stats.NextLevelMin or 0
+	local pct = hi > lo and math.clamp((stats.NetWorth - lo) / (hi - lo), 0, 1) or 1
+	TweenService:Create(progressFill,
+		TweenInfo.new(0.6, Enum.EasingStyle.Quad),
+		{ Size = UDim2.new(pct, 0, 1, 0) }
+	):Play()
+	if stats.Title ~= currentTitle or stats.Level ~= currentLevel then
+		currentTitle = stats.Title
+		currentLevel = stats.Level
+		local char = player.Character
+		if char then updateOverheadTitle(char, currentTitle) end
+	end
+end
+-- ============================================================
+-- CHARACTER SPAWN
+-- ============================================================
+local function onCharacterAdded(character)
+	task.wait(0.5)
+	setupOverheadTag(character, currentTitle, currentLevel)
+end
+player.CharacterAdded:Connect(onCharacterAdded)
+if player.Character then
+	task.spawn(function()
+		onCharacterAdded(player.Character)
+	end)
+end
+-- ============================================================
+-- LEVEL UP EVENT
+-- ============================================================
+LevelUp.OnClientEvent:Connect(function(newLevel, newTitle)
+	currentLevel = newLevel
+	currentTitle = newTitle
+	levelLabel.Text = "Level " .. newLevel .. "  ·  " .. newTitle
+	showLevelUpBanner(newTitle)
+	local char = player.Character
+	if char then updateOverheadTitle(char, newTitle) end
+	refreshHUD()
+end)
+-- ============================================================
+-- POLL LOOP
+-- ============================================================
+refreshHUD()
+task.spawn(function()
+	while task.wait(2.5) do refreshHUD() end
+end)
