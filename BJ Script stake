@@ -1,0 +1,268 @@
+-- BlackjackServer | Script in ServerScriptService
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local SSS = game:GetService("ServerScriptService")
+local DM = require(SSS:WaitForChild("DataStoreManager", 10))
+
+local Events = RS:FindFirstChild("Events")
+if not Events then Events = Instance.new("Folder"); Events.Name="Events"; Events.Parent=RS end
+
+local function goc(n,c)
+	local e=Events:FindFirstChild(n); if e then return e end
+	local x=Instance.new(c); x.Name=n; x.Parent=Events; return x
+end
+
+local BJAction = goc("BlackjackAction","RemoteEvent")
+local BJUpdate = goc("BlackjackUpdate","RemoteEvent")
+local OpenBJ   = goc("OpenBlackjack","RemoteEvent")
+local UpdCash  = Events:FindFirstChild("UpdateCurrency")
+
+local SUITS={"spade","club","heart","diamond"}
+local RANKS={"A","2","3","4","5","6","7","8","9","10","J","Q","K"}
+
+local function cv(r) if r=="A" then return 11 end; if r=="J"or r=="Q"or r=="K" then return 10 end; return tonumber(r) end
+
+local function newDeck()
+	local d={}
+	for _,s in ipairs(SUITS) do for _,r in ipairs(RANKS) do table.insert(d,{rank=r,suit=s,value=cv(r)}) end end
+	for i=#d,2,-1 do local j=math.random(1,i); d[i],d[j]=d[j],d[i] end
+	return d
+end
+
+local function ht(h) local t,a=0,0; for _,c in ipairs(h) do t+=c.value; if c.rank=="A" then a+=1 end end; while t>21 and a>0 do t-=10;a-=1 end; return t end
+
+local function modCash(p,amt)
+	local ok,d=pcall(function() return DM:GetData(p) end)
+	if ok and d then d.Cash=math.max(0,(d.Cash or 0)+amt); if UpdCash then UpdCash:FireClient(p,d.Cash) end; return d.Cash end
+end
+
+local S = {}
+
+local function send(p, extra)
+	local s=S[p]; if not s then return end
+	local hands={}
+	for i,h in ipairs(s.hands) do
+		hands[i]={cards=h.cards,total=ht(h.cards),bet=h.bet,done=h.done,result=h.result or "",message=h.message or ""}
+	end
+	local ah = s.activeHand <= #s.hands and s.hands[s.activeHand] or nil
+	BJUpdate:FireClient(p, {
+		phase=s.phase, hands=hands, activeHand=s.activeHand,
+		dealerHand=s.dealerHand, dealerTotal=ht(s.dealerHand),
+		hideDealer=s.phase=="playing" or s.phase=="insurance",
+		message=extra and extra.message or "", result=extra and extra.result or "",
+		canSplit=s.phase=="playing" and ah and not ah.done and #ah.cards==2
+			and ah.cards[1].value==ah.cards[2].value and #s.hands<4,
+		canDouble=s.phase=="playing" and ah and #ah.cards==2 and not ah.done,
+		totalBet=s.totalBet or 0,
+		insuranceCost=s.phase=="insurance" and math.floor(s.hands[1].bet/2) or nil,
+	})
+end
+
+local function advance(p)
+	local s=S[p]; s.activeHand+=1
+	while s.activeHand<=#s.hands do
+		local h=s.hands[s.activeHand]
+		if not h.done then
+			if #h.cards==1 then table.insert(h.cards,table.remove(s.deck)) end
+			if ht(h.cards)==21 and #h.cards==2 then h.done=true;h.result="blackjack";s.activeHand+=1
+			else send(p);return end
+		else s.activeHand+=1 end
+	end
+	s.phase="dealer"
+	while ht(s.dealerHand)<17 do table.insert(s.dealerHand,table.remove(s.deck)) end
+	local dt=ht(s.dealerHand)
+	local totalWin,totalBet=0,0
+	for _,h in ipairs(s.hands) do
+		local pt=ht(h.cards); totalBet+=h.bet
+		if h.result=="bust" then h.message="Bust"
+		elseif h.result=="blackjack" then
+			local pay=math.floor(h.bet*2.5); modCash(p,pay); totalWin+=pay; h.message="Blackjack!"
+		elseif dt>21 then modCash(p,h.bet*2);totalWin+=h.bet*2;h.result="win";h.message="Dealer bust!"
+		elseif pt>dt then modCash(p,h.bet*2);totalWin+=h.bet*2;h.result="win";h.message="Win!"
+		elseif pt==dt then modCash(p,h.bet);totalWin+=h.bet;h.result="push";h.message="Push"
+		else h.result="lose";h.message="Lose" end
+	end
+	-- Insurance payout
+	local insMsg = ""
+	if s.insurance and s.insurance > 0 then
+		if ht(s.dealerHand) == 21 and #s.dealerHand == 2 then
+			local insPay = s.insurance * 3
+			modCash(p, insPay); totalWin += insPay
+			insMsg = " (Insurance paid $"..(insPay - s.insurance)..")"
+		end
+	end
+	s.phase="done"
+	local profit=totalWin-totalBet-(s.insurance or 0)
+	local msg
+	if profit>0 then msg="You won $"..profit.."!"..insMsg
+	elseif profit==0 then msg="Push"..insMsg
+	else msg="You lost $"..math.abs(profit)..insMsg end
+	send(p,{message=msg,result=profit>0 and "win" or profit==0 and "push" or "lose"})
+	S[p]=nil
+end
+
+local function startGame(p,bet)
+	local ok,d=pcall(function() return DM:GetData(p) end)
+	if not ok or not d then BJUpdate:FireClient(p,{phase="betting",message="Error"}); return end
+	bet=tonumber(bet) or 0
+	if bet<100 then BJUpdate:FireClient(p,{phase="betting",message="Min bet $100"}); return end
+	if bet>10000 then BJUpdate:FireClient(p,{phase="betting",message="Max bet $10,000"}); return end
+	if d.Cash<bet then BJUpdate:FireClient(p,{phase="betting",message="Not enough cash!"}); return end
+	modCash(p,-bet)
+	local deck=newDeck()
+	local pH={table.remove(deck),table.remove(deck)}
+	local dH={table.remove(deck),table.remove(deck)}
+	S[p]={phase="playing",deck=deck,dealerHand=dH,hands={{cards=pH,bet=bet,done=false}},activeHand=1,totalBet=bet,insurance=0}
+	-- Natural blackjack
+	if ht(pH)==21 then
+		local s=S[p]; s.hands[1].done=true
+		if ht(dH)==21 then
+			s.hands[1].result="push";s.hands[1].message="Both blackjack"
+			modCash(p,bet);s.phase="done"
+			send(p,{message="Push!",result="push"})
+		else
+			local pay=math.floor(bet*2.5);modCash(p,pay)
+			s.hands[1].result="blackjack";s.hands[1].message="Blackjack!"
+			s.phase="done"
+			send(p,{message="BLACKJACK! +$"..(pay-bet),result="blackjack"})
+		end
+		S[p]=nil;return
+	end
+	-- Offer insurance if dealer shows Ace
+	if dH[1].rank == "A" then
+		S[p].phase = "insurance"
+		send(p)
+		return
+	end
+	send(p)
+end
+
+local function playerHit(p)
+	local s=S[p]; if not s or s.phase~="playing" then return end
+	local h=s.hands[s.activeHand]; if not h or h.done then return end
+	table.insert(h.cards,table.remove(s.deck))
+	local t=ht(h.cards)
+	if t>21 then h.done=true;h.result="bust";h.message="Bust";advance(p)
+	elseif t==21 then h.done=true;advance(p)
+	else send(p) end
+end
+
+local function playerStand(p)
+	local s=S[p]; if not s or s.phase~="playing" then return end
+	local h=s.hands[s.activeHand]; if not h or h.done then return end
+	h.done=true; advance(p)
+end
+
+local function playerDouble(p)
+	local s=S[p]; if not s or s.phase~="playing" then return end
+	local h=s.hands[s.activeHand]; if not h or h.done or #h.cards~=2 then return end
+	local ok,d=pcall(function() return DM:GetData(p) end)
+	if not ok or not d or d.Cash<h.bet then send(p,{message="Not enough cash!"}); return end
+	modCash(p,-h.bet);s.totalBet+=h.bet;h.bet*=2
+	table.insert(h.cards,table.remove(s.deck));h.done=true
+	if ht(h.cards)>21 then h.result="bust";h.message="Bust" end
+	advance(p)
+end
+
+local function playerSplit(p)
+	local s=S[p]; if not s or s.phase~="playing" then return end
+	local h=s.hands[s.activeHand]
+	if not h or h.done or #h.cards~=2 or h.cards[1].value~=h.cards[2].value or #s.hands>=4 then return end
+	local ok,d=pcall(function() return DM:GetData(p) end)
+	if not ok or not d or d.Cash<h.bet then send(p,{message="Not enough cash!"}); return end
+	modCash(p,-h.bet);s.totalBet+=h.bet
+	local sc=table.remove(h.cards,2)
+	table.insert(h.cards,table.remove(s.deck))
+	table.insert(s.hands,s.activeHand+1,{cards={sc},bet=h.bet,done=false})
+	if ht(h.cards)==21 then h.done=true;advance(p) else send(p) end
+end
+
+local function handleInsurance(p, take)
+	local s = S[p]; if not s or s.phase ~= "insurance" then return end
+	if take then
+		local cost = math.floor(s.hands[1].bet / 2)
+		local ok, d = pcall(function() return DM:GetData(p) end)
+		if ok and d and d.Cash >= cost then
+			modCash(p, -cost)
+			s.insurance = cost
+		end
+	end
+	-- Check dealer blackjack
+	if ht(s.dealerHand) == 21 then
+		s.phase = "done"
+		s.hands[1].done = true
+		local totalWin = 0
+		if s.insurance > 0 then
+			local insPay = s.insurance * 3
+			modCash(p, insPay); totalWin += insPay
+		end
+		if ht(s.hands[1].cards) == 21 then
+			modCash(p, s.hands[1].bet); totalWin += s.hands[1].bet
+			s.hands[1].result = "push"; s.hands[1].message = "Push"
+		else
+			s.hands[1].result = "lose"; s.hands[1].message = "Lose"
+		end
+		local profit = totalWin - s.totalBet - s.insurance
+		local msg = profit >= 0 and "Insurance saved you!" or "Dealer blackjack. You lost $"..math.abs(profit)
+		send(p, {message=msg, result=profit>=0 and "push" or "lose"})
+		S[p] = nil; return
+	end
+	-- No dealer BJ — insurance lost, continue playing
+	s.phase = "playing"
+	if s.insurance > 0 then
+		send(p, {message="No blackjack. Insurance lost."})
+	else
+		send(p)
+	end
+end
+
+BJAction.OnServerEvent:Connect(function(p,a,d)
+	if a=="bet" then startGame(p,d)
+	elseif a=="hit" then playerHit(p)
+	elseif a=="stand" then playerStand(p)
+	elseif a=="double" then playerDouble(p)
+	elseif a=="split" then playerSplit(p)
+	elseif a=="insurance_yes" then handleInsurance(p, true)
+	elseif a=="insurance_no" then handleInsurance(p, false)
+	elseif a=="close" then
+		local s=S[p]
+		if s then for _,h in ipairs(s.hands) do if not h.done then modCash(p,h.bet) end end end
+		S[p]=nil
+	end
+end)
+
+Players.PlayerRemoving:Connect(function(p) S[p]=nil end)
+
+local function setupTable(tableModel)
+	local root = tableModel.PrimaryPart or tableModel:FindFirstChildWhichIsA("BasePart", true)
+	if not root then warn("BlackjackServer: No BasePart on "..tableModel.Name); return end
+	-- Remove any existing prompts (from duplicated tables)
+	for _, c in ipairs(root:GetChildren()) do
+		if c:IsA("ProximityPrompt") then c:Destroy() end
+	end
+	local p = Instance.new("ProximityPrompt")
+	p.ActionText = "Play"; p.ObjectText = "Blackjack"
+	p.KeyboardKeyCode = Enum.KeyCode.E; p.MaxActivationDistance = 10
+	p.HoldDuration = 0; p.Parent = root
+	p.Triggered:Connect(function(plr) OpenBJ:FireClient(plr) end)
+	print("BlackjackServer: Prompt attached to " .. tableModel:GetFullName())
+end
+
+task.spawn(function()
+	task.wait(1)
+	-- Find ALL blackjack tables in workspace
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		if obj:IsA("Model") and string.find(obj.Name, "BlackjackTable") then
+			setupTable(obj)
+		end
+	end
+	-- Also catch any tables added later
+	workspace.DescendantAdded:Connect(function(obj)
+		if obj:IsA("Model") and string.find(obj.Name, "BlackjackTable") then
+			task.wait(0.5)
+			setupTable(obj)
+		end
+	end)
+	print("BlackjackServer: Ready!")
+end)
+print("BlackjackServer: Loaded!")
