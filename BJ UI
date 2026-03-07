@@ -1,0 +1,560 @@
+-- BlackjackClient | LocalScript in StarterGui
+-- Stake-style dark theme | slow dealer draw | insurance | sounds
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local SoundService = game:GetService("SoundService")
+
+local player = Players.LocalPlayer
+local Events = RS:WaitForChild("Events", 30)
+if not Events then return end
+local BJAction = Events:WaitForChild("BlackjackAction", 30)
+local BJUpdate = Events:WaitForChild("BlackjackUpdate", 30)
+local OpenBJ   = Events:WaitForChild("OpenBlackjack", 30)
+if not BJAction or not BJUpdate or not OpenBJ then return end
+
+-- ══════════════════════════════════════════
+-- SOUNDS
+-- ══════════════════════════════════════════
+local function makeSound(id, vol)
+	local s = Instance.new("Sound")
+	s.SoundId = "rbxassetid://"..id; s.Volume = vol or 0.5
+	s.Parent = SoundService; return s
+end
+local sndDeal = makeSound(138188735, 0.4)
+local sndChip = makeSound(138188735, 0.25)
+local sndWin  = makeSound(138446488, 0.6)
+
+-- ══════════════════════════════════════════
+-- STAKE DARK THEME
+-- ══════════════════════════════════════════
+local T = {
+	bg=Color3.fromRGB(15,17,21), panel=Color3.fromRGB(22,25,31),
+	card=Color3.fromRGB(30,34,42), cardFace=Color3.fromRGB(255,255,255),
+	surface=Color3.fromRGB(28,32,40), border=Color3.fromRGB(40,45,55),
+	accent=Color3.fromRGB(0,194,120), red=Color3.fromRGB(237,69,83),
+	redDim=Color3.fromRGB(180,50,60), blue=Color3.fromRGB(55,120,250),
+	purple=Color3.fromRGB(140,80,220), orange=Color3.fromRGB(255,170,50),
+	textMain=Color3.fromRGB(220,225,235), textDim=Color3.fromRGB(120,130,150),
+	textMuted=Color3.fromRGB(70,78,95), white=Color3.fromRGB(255,255,255),
+	black=Color3.fromRGB(0,0,0), cardBack=Color3.fromRGB(30,75,60),
+	winGreen=Color3.fromRGB(0,220,120), losePink=Color3.fromRGB(237,69,83),
+	pushYel=Color3.fromRGB(255,195,0),
+}
+local SUIT_SYM = {spade="♠", club="♣", heart="♥", diamond="♦"}
+local SUIT_COL = {
+	spade=Color3.fromRGB(30,30,30), club=Color3.fromRGB(30,30,30),
+	heart=T.red, diamond=T.red,
+}
+
+-- ══════════════════════════════════════════
+-- GUI SKELETON
+-- ══════════════════════════════════════════
+local gui = Instance.new("ScreenGui")
+gui.Name="BlackjackGui"; gui.ResetOnSpawn=false; gui.Enabled=false
+gui.DisplayOrder=10; gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+gui.Parent=player:WaitForChild("PlayerGui")
+
+local dim=Instance.new("Frame")
+dim.Size=UDim2.new(1,0,1,0); dim.BackgroundColor3=T.black
+dim.BackgroundTransparency=0.4; dim.BorderSizePixel=0; dim.ZIndex=1; dim.Parent=gui
+
+local main=Instance.new("Frame")
+main.Size=UDim2.new(0,780,0,560); main.Position=UDim2.new(0.5,-390,0.5,-280)
+main.BackgroundColor3=T.panel; main.BorderSizePixel=0; main.ZIndex=2; main.Parent=gui
+Instance.new("UICorner",main).CornerRadius=UDim.new(0,14)
+Instance.new("UIStroke",main).Color=T.border
+
+local hdr=Instance.new("Frame")
+hdr.Size=UDim2.new(1,0,0,48); hdr.BackgroundColor3=T.bg; hdr.BorderSizePixel=0; hdr.ZIndex=3; hdr.Parent=main
+Instance.new("UICorner",hdr).CornerRadius=UDim.new(0,14)
+local hFill=Instance.new("Frame"); hFill.Size=UDim2.new(1,0,0,14); hFill.Position=UDim2.new(0,0,1,-14)
+hFill.BackgroundColor3=T.bg; hFill.BorderSizePixel=0; hFill.ZIndex=3; hFill.Parent=hdr
+
+local tLbl=Instance.new("TextLabel")
+tLbl.Size=UDim2.new(0,200,1,0); tLbl.Position=UDim2.new(0,20,0,0); tLbl.BackgroundTransparency=1
+tLbl.Text="Blackjack"; tLbl.TextColor3=T.textMain; tLbl.TextSize=20
+tLbl.Font=Enum.Font.GothamBold; tLbl.TextXAlignment=Enum.TextXAlignment.Left; tLbl.ZIndex=4; tLbl.Parent=hdr
+
+local eLbl=Instance.new("TextLabel")
+eLbl.Size=UDim2.new(0,120,0,20); eLbl.Position=UDim2.new(0,220,0,14); eLbl.BackgroundTransparency=1
+eLbl.Text="Edge: 0.50%"; eLbl.TextColor3=T.textMuted; eLbl.TextSize=12
+eLbl.Font=Enum.Font.Gotham; eLbl.TextXAlignment=Enum.TextXAlignment.Left; eLbl.ZIndex=4; eLbl.Parent=hdr
+
+local closeBtn=Instance.new("TextButton")
+closeBtn.Size=UDim2.new(0,36,0,36); closeBtn.Position=UDim2.new(1,-42,0,6)
+closeBtn.BackgroundColor3=T.surface; closeBtn.Text="✕"; closeBtn.TextColor3=T.textDim
+closeBtn.TextSize=18; closeBtn.Font=Enum.Font.GothamBold; closeBtn.BorderSizePixel=0
+closeBtn.ZIndex=5; closeBtn.Parent=main
+Instance.new("UICorner",closeBtn).CornerRadius=UDim.new(0,8)
+
+local gameArea=Instance.new("Frame")
+gameArea.Size=UDim2.new(1,-40,0,330); gameArea.Position=UDim2.new(0,20,0,56)
+gameArea.BackgroundColor3=T.surface; gameArea.BorderSizePixel=0; gameArea.ZIndex=2
+gameArea.ClipsDescendants=true; gameArea.Parent=main
+Instance.new("UICorner",gameArea).CornerRadius=UDim.new(0,12)
+
+local dLbl=Instance.new("TextLabel")
+dLbl.Size=UDim2.new(0,70,0,18); dLbl.Position=UDim2.new(0,16,0,12); dLbl.BackgroundTransparency=1
+dLbl.Text="DEALER"; dLbl.TextColor3=T.textDim; dLbl.TextSize=11; dLbl.Font=Enum.Font.GothamBold
+dLbl.TextXAlignment=Enum.TextXAlignment.Left; dLbl.ZIndex=3; dLbl.Parent=gameArea
+
+local dtBadge=Instance.new("Frame")
+dtBadge.Size=UDim2.new(0,36,0,22); dtBadge.Position=UDim2.new(0,88,0,10)
+dtBadge.BackgroundColor3=T.card; dtBadge.BorderSizePixel=0; dtBadge.ZIndex=3; dtBadge.Parent=gameArea
+Instance.new("UICorner",dtBadge).CornerRadius=UDim.new(0,6)
+local dtLbl=Instance.new("TextLabel")
+dtLbl.Size=UDim2.new(1,0,1,0); dtLbl.BackgroundTransparency=1; dtLbl.Text=""
+dtLbl.TextColor3=T.textMain; dtLbl.TextSize=13; dtLbl.Font=Enum.Font.GothamBold; dtLbl.ZIndex=4; dtLbl.Parent=dtBadge
+
+local dealerCards=Instance.new("Frame")
+dealerCards.Size=UDim2.new(1,-32,0,100); dealerCards.Position=UDim2.new(0,16,0,38)
+dealerCards.BackgroundTransparency=1; dealerCards.ZIndex=3; dealerCards.Parent=gameArea
+
+local divLine=Instance.new("Frame")
+divLine.Size=UDim2.new(1,-32,0,1); divLine.Position=UDim2.new(0,16,0,148)
+divLine.BackgroundColor3=T.border; divLine.BorderSizePixel=0; divLine.ZIndex=3
+divLine.BackgroundTransparency=0.5; divLine.Parent=gameArea
+
+local handsCont=Instance.new("Frame")
+handsCont.Size=UDim2.new(1,-32,0,170); handsCont.Position=UDim2.new(0,16,0,155)
+handsCont.BackgroundTransparency=1; handsCont.ZIndex=3; handsCont.Parent=gameArea
+
+local msgLbl=Instance.new("TextLabel")
+msgLbl.Size=UDim2.new(1,-40,0,36); msgLbl.Position=UDim2.new(0,20,0,392)
+msgLbl.BackgroundTransparency=1; msgLbl.Text=""; msgLbl.TextColor3=T.accent
+msgLbl.TextSize=18; msgLbl.Font=Enum.Font.GothamBold; msgLbl.ZIndex=3; msgLbl.Parent=main
+
+local betLbl=Instance.new("TextLabel")
+betLbl.Size=UDim2.new(1,-40,0,28); betLbl.Position=UDim2.new(0,20,0,426)
+betLbl.BackgroundTransparency=1; betLbl.Text="$0"; betLbl.TextColor3=T.textMain
+betLbl.TextSize=16; betLbl.Font=Enum.Font.GothamBold; betLbl.ZIndex=3; betLbl.Parent=main
+
+-- Chips
+local chipFrame=Instance.new("Frame")
+chipFrame.Size=UDim2.new(1,-40,0,44); chipFrame.Position=UDim2.new(0,20,0,458)
+chipFrame.BackgroundTransparency=1; chipFrame.Visible=false; chipFrame.ZIndex=3; chipFrame.Parent=main
+local cLayout=Instance.new("UIListLayout",chipFrame)
+cLayout.FillDirection=Enum.FillDirection.Horizontal; cLayout.Padding=UDim.new(0,6)
+cLayout.HorizontalAlignment=Enum.HorizontalAlignment.Center
+
+local CHIPS={{l="100",v=100},{l="500",v=500},{l="1K",v=1000},{l="5K",v=5000},{l="10K",v=10000}}
+local currentBet=0
+for _,chip in ipairs(CHIPS) do
+	local btn=Instance.new("TextButton")
+	btn.Size=UDim2.new(0,62,0,40); btn.BackgroundColor3=T.card; btn.Text=chip.l
+	btn.TextColor3=T.textDim; btn.TextSize=14; btn.Font=Enum.Font.GothamBold
+	btn.BorderSizePixel=0; btn.ZIndex=4; btn.Parent=chipFrame
+	Instance.new("UICorner",btn).CornerRadius=UDim.new(0,8)
+	Instance.new("UIStroke",btn).Color=T.border
+	btn.MouseButton1Click:Connect(function()
+		if currentBet+chip.v<=10000 then currentBet+=chip.v; betLbl.Text="$"..currentBet; sndChip:Play() end
+	end)
+	btn.MouseEnter:Connect(function()
+		TweenService:Create(btn,TweenInfo.new(0.1),{BackgroundColor3=T.accent,TextColor3=T.black}):Play()
+	end)
+	btn.MouseLeave:Connect(function()
+		TweenService:Create(btn,TweenInfo.new(0.15),{BackgroundColor3=T.card,TextColor3=T.textDim}):Play()
+	end)
+end
+
+-- Buttons
+local btnFrame=Instance.new("Frame")
+btnFrame.Size=UDim2.new(1,-40,0,46); btnFrame.Position=UDim2.new(0,20,0,506)
+btnFrame.BackgroundTransparency=1; btnFrame.ZIndex=3; btnFrame.Parent=main
+
+local function makeBtn(txt,col,w)
+	local b=Instance.new("TextButton")
+	b.Size=UDim2.new(0,w,0,42); b.BackgroundColor3=col; b.Text=txt
+	b.TextColor3=T.white; b.TextSize=15; b.Font=Enum.Font.GothamBold
+	b.BorderSizePixel=0; b.ZIndex=4; b.Visible=false; b.Parent=btnFrame
+	Instance.new("UICorner",b).CornerRadius=UDim.new(0,10)
+	local hc=col:Lerp(T.white,0.15)
+	b.MouseEnter:Connect(function() TweenService:Create(b,TweenInfo.new(0.1),{BackgroundColor3=hc}):Play() end)
+	b.MouseLeave:Connect(function() TweenService:Create(b,TweenInfo.new(0.12),{BackgroundColor3=col}):Play() end)
+	return b
+end
+
+local clearBtn  =makeBtn("Clear",T.card,80); clearBtn.TextColor3=T.textDim
+local dealBtn   =makeBtn("Deal",T.accent,200)
+local hitBtn    =makeBtn("Hit",T.accent,130)
+local standBtn  =makeBtn("Stand",T.redDim,130)
+local doubleBtn =makeBtn("2x",T.purple,90)
+local splitBtn  =makeBtn("Split",T.blue,90)
+local replayBtn =makeBtn("Bet Again",T.accent,200)
+local insYesBtn =makeBtn("Insurance",T.orange,160)
+local insNoBtn  =makeBtn("No Thanks",T.card,140); insNoBtn.TextColor3=T.textDim
+
+local function posCenter(btns)
+	local tw=0; for _,b in ipairs(btns) do tw+=b.Size.X.Offset end; tw+=(#btns-1)*8
+	local x=math.floor((740-tw)/2)
+	for _,b in ipairs(btns) do b.Position=UDim2.new(0,x,0,0); x+=b.Size.X.Offset+8 end
+end
+
+-- ══════════════════════════════════════════
+-- CARD CREATION
+-- ══════════════════════════════════════════
+local function clearFrame(f) for _,c in ipairs(f:GetChildren()) do c:Destroy() end end
+
+local function makeCard(rank, suit, hidden)
+	local wrap=Instance.new("Frame")
+	wrap.Size=UDim2.new(0,68,0,95); wrap.BackgroundTransparency=1; wrap.ZIndex=4
+
+	local c=Instance.new("Frame")
+	c.Size=UDim2.new(1,0,1,0); c.BorderSizePixel=0; c.ZIndex=4; c.Parent=wrap
+	Instance.new("UICorner",c).CornerRadius=UDim.new(0,10)
+
+	if hidden then
+		c.BackgroundColor3=T.cardBack
+		local inner=Instance.new("Frame")
+		inner.Size=UDim2.new(0.7,0,0.7,0); inner.Position=UDim2.new(0.15,0,0.15,0)
+		inner.BackgroundColor3=T.accent; inner.BackgroundTransparency=0.85
+		inner.BorderSizePixel=0; inner.ZIndex=5; inner.Parent=c
+		Instance.new("UICorner",inner).CornerRadius=UDim.new(0,8)
+		local is=Instance.new("UIStroke",inner); is.Color=T.accent; is.Thickness=1.5; is.Transparency=0.5
+		local q=Instance.new("TextLabel"); q.Size=UDim2.new(1,0,1,0); q.BackgroundTransparency=1
+		q.Text="?"; q.TextColor3=T.accent; q.TextSize=32; q.Font=Enum.Font.GothamBold
+		q.ZIndex=6; q.TextTransparency=0.6; q.Parent=inner
+		local cs=Instance.new("UIStroke",c); cs.Color=T.accent; cs.Transparency=0.4
+	else
+		c.BackgroundColor3=T.cardFace
+		local sym=SUIT_SYM[suit] or "?"; local col=SUIT_COL[suit] or T.black
+		local isRed=suit=="heart" or suit=="diamond"
+		local tc=isRed and T.red or Color3.fromRGB(30,30,30)
+
+		local tr=Instance.new("TextLabel"); tr.Size=UDim2.new(0,28,0,20); tr.Position=UDim2.new(0,5,0,4)
+		tr.BackgroundTransparency=1; tr.Text=rank; tr.TextColor3=tc; tr.TextSize=15
+		tr.Font=Enum.Font.GothamBold; tr.TextXAlignment=Enum.TextXAlignment.Left; tr.ZIndex=5; tr.Parent=c
+
+		local ts=Instance.new("TextLabel"); ts.Size=UDim2.new(0,20,0,14); ts.Position=UDim2.new(0,5,0,22)
+		ts.BackgroundTransparency=1; ts.Text=sym; ts.TextColor3=col; ts.TextSize=12
+		ts.Font=Enum.Font.GothamBold; ts.TextXAlignment=Enum.TextXAlignment.Left; ts.ZIndex=5; ts.Parent=c
+
+		local cs2=Instance.new("TextLabel"); cs2.Size=UDim2.new(0,40,0,40); cs2.Position=UDim2.new(0.5,-20,0.5,-20)
+		cs2.BackgroundTransparency=1; cs2.Text=sym; cs2.TextColor3=col; cs2.TextSize=34
+		cs2.Font=Enum.Font.GothamBold; cs2.ZIndex=5; cs2.Parent=c
+
+		local br=Instance.new("TextLabel"); br.Size=UDim2.new(0,28,0,20); br.Position=UDim2.new(1,-33,1,-24)
+		br.BackgroundTransparency=1; br.Text=rank; br.TextColor3=tc; br.TextSize=15
+		br.Font=Enum.Font.GothamBold; br.TextXAlignment=Enum.TextXAlignment.Right; br.ZIndex=5; br.Parent=c
+
+		local bs=Instance.new("TextLabel"); bs.Size=UDim2.new(0,20,0,14); bs.Position=UDim2.new(1,-25,1,-38)
+		bs.BackgroundTransparency=1; bs.Text=sym; bs.TextColor3=col; bs.TextSize=12
+		bs.Font=Enum.Font.GothamBold; bs.TextXAlignment=Enum.TextXAlignment.Right; bs.ZIndex=5; bs.Parent=c
+
+		local stroke=Instance.new("UIStroke",c); stroke.Color=Color3.fromRGB(200,200,200); stroke.Transparency=0.6
+	end
+	return wrap
+end
+
+-- Animate a card sliding in from above
+local function animateCardIn(cardUI)
+	local inner = cardUI:FindFirstChildWhichIsA("Frame")
+	if not inner then return end
+	inner.BackgroundTransparency = 1
+	for _,d in ipairs(inner:GetDescendants()) do
+		if d:IsA("TextLabel") then d.TextTransparency=1 end
+		if d:IsA("Frame") then d.BackgroundTransparency=1 end
+		if d:IsA("UIStroke") then d.Transparency=1 end
+	end
+	local origPos = cardUI.Position
+	cardUI.Position = origPos + UDim2.new(0,0,0,-20)
+
+	sndDeal:Play()
+	TweenService:Create(cardUI, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Position = origPos
+	}):Play()
+	TweenService:Create(inner, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {BackgroundTransparency=0}):Play()
+	task.delay(0.08, function()
+		for _,d in ipairs(inner:GetDescendants()) do
+			if d:IsA("TextLabel") then
+				local tgt = 0
+				if d.Text=="?" then tgt=0.6 end
+				TweenService:Create(d, TweenInfo.new(0.15), {TextTransparency=tgt}):Play()
+			end
+			if d:IsA("Frame") then
+				local tgt2 = 0
+				if d:FindFirstChild("UIStroke") then tgt2=0.85 end
+				TweenService:Create(d, TweenInfo.new(0.15), {BackgroundTransparency=tgt2}):Play()
+			end
+			if d:IsA("UIStroke") then
+				TweenService:Create(d, TweenInfo.new(0.15), {Transparency=0.4}):Play()
+			end
+		end
+	end)
+end
+
+-- ══════════════════════════════════════════
+-- RENDER FUNCTIONS
+-- ══════════════════════════════════════════
+local function renderHandInstant(frame, hand, hideSecond)
+	clearFrame(frame)
+	for i,c in ipairs(hand) do
+		local hidden = hideSecond and i==2
+		local cu = makeCard(c.rank, c.suit, hidden)
+		cu.Position = UDim2.new(0,(i-1)*74,0,0); cu.Parent=frame
+	end
+end
+
+local function renderHandAnimated(frame, hand, hideSecond, stagger)
+	clearFrame(frame)
+	stagger = stagger or 0.4
+	for i,c in ipairs(hand) do
+		local hidden = hideSecond and i==2
+		local cu = makeCard(c.rank, c.suit, hidden)
+		cu.Position = UDim2.new(0,(i-1)*74,0,0); cu.Parent=frame
+		task.delay((i-1)*stagger, function() animateCardIn(cu) end)
+	end
+end
+
+-- Dealer reveal: flip hidden card, then draw new cards one by one
+-- Returns total animation time
+local function revealDealerSequence(hand)
+	clearFrame(dealerCards)
+	local CARD_DELAY = 0.6
+	local totalTime = 0
+
+	-- Card 1: face-up instantly
+	local c1 = makeCard(hand[1].rank, hand[1].suit, false)
+	c1.Position = UDim2.new(0,0,0,0); c1.Parent=dealerCards
+
+	-- Card 2: flip from hidden to revealed
+	local c2 = makeCard(hand[2].rank, hand[2].suit, false)
+	c2.Position = UDim2.new(0,74,0,0); c2.Parent=dealerCards
+	animateCardIn(c2)
+	totalTime = 0.5
+
+	-- Update total after flip for 2-card hands
+	if #hand == 2 then
+		task.delay(0.35, function()
+			local t,a=0,0
+			for _,cd in ipairs(hand) do t+=cd.value; if cd.rank=="A" then a+=1 end end
+			while t>21 and a>0 do t-=10;a-=1 end
+			dtLbl.Text = tostring(t)
+		end)
+	end
+
+	-- Cards 3+ draw one at a time with CARD_DELAY between each
+	for i=3, #hand do
+		local delay = totalTime + (i-3)*CARD_DELAY
+		local cardIdx = i
+		task.delay(delay, function()
+			local cu = makeCard(hand[cardIdx].rank, hand[cardIdx].suit, false)
+			cu.Position = UDim2.new(0,(cardIdx-1)*74,0,0); cu.Parent=dealerCards
+			animateCardIn(cu)
+			-- Update running total after each card lands
+			task.delay(0.25, function()
+				local t,aces=0,0
+				for j=1,cardIdx do
+					t+=hand[j].value; if hand[j].rank=="A" then aces+=1 end
+				end
+				while t>21 and aces>0 do t-=10;aces-=1 end
+				dtLbl.Text = tostring(t)
+			end)
+		end)
+		totalTime = delay + 0.4
+	end
+
+	totalTime = totalTime + 0.3
+	return totalTime
+end
+
+local function renderAllHands(hands, activeHand, phase, animate)
+	clearFrame(handsCont)
+	local n=#hands; local hw=math.min(360,math.floor(700/n))
+	for i,h in ipairs(hands) do
+		local hf=Instance.new("Frame")
+		hf.Size=UDim2.new(0,hw,0,165); hf.Position=UDim2.new(0,(i-1)*hw,0,0)
+		hf.BackgroundTransparency=1; hf.ZIndex=3; hf.Parent=handsCont
+
+		if n>1 then
+			local ind=Instance.new("Frame"); ind.Size=UDim2.new(1,-6,1,-6); ind.Position=UDim2.new(0,3,0,3)
+			ind.BackgroundTransparency=1; ind.ZIndex=3; ind.Parent=hf
+			Instance.new("UICorner",ind).CornerRadius=UDim.new(0,8)
+			local is=Instance.new("UIStroke",ind); is.Thickness=1; is.Transparency=0.5
+			if i==activeHand and phase=="playing" then is.Color=T.accent;is.Thickness=2;is.Transparency=0.2
+			elseif h.result=="win" or h.result=="blackjack" then is.Color=T.winGreen
+			elseif h.result=="lose" or h.result=="bust" then is.Color=T.losePink
+			elseif h.result=="push" then is.Color=T.pushYel
+			else is.Color=T.border end
+		end
+
+		local nl=Instance.new("TextLabel"); nl.Size=UDim2.new(0,80,0,16); nl.Position=UDim2.new(0,8,0,4)
+		nl.BackgroundTransparency=1; nl.Text=n>1 and ("Hand "..i) or "You"
+		nl.TextColor3=i==activeHand and phase=="playing" and T.accent or T.textDim
+		nl.TextSize=11; nl.Font=Enum.Font.GothamBold; nl.TextXAlignment=Enum.TextXAlignment.Left
+		nl.ZIndex=4; nl.Parent=hf
+
+		local tb=Instance.new("Frame"); tb.Size=UDim2.new(0,32,0,18); tb.Position=UDim2.new(0,90,0,3)
+		tb.BackgroundColor3=T.card; tb.BorderSizePixel=0; tb.ZIndex=4; tb.Parent=hf
+		Instance.new("UICorner",tb).CornerRadius=UDim.new(0,5)
+		local tl=Instance.new("TextLabel"); tl.Size=UDim2.new(1,0,1,0); tl.BackgroundTransparency=1
+		tl.Text=tostring(h.total or 0); tl.TextColor3=T.textMain; tl.TextSize=12
+		tl.Font=Enum.Font.GothamBold; tl.ZIndex=5; tl.Parent=tb
+
+		if h.message and h.message~="" then
+			local rl=Instance.new("TextLabel"); rl.Size=UDim2.new(1,-8,0,14); rl.Position=UDim2.new(0,8,0,22)
+			rl.BackgroundTransparency=1; rl.Text=h.message; rl.TextSize=11; rl.Font=Enum.Font.GothamBold
+			rl.TextXAlignment=Enum.TextXAlignment.Left; rl.ZIndex=4; rl.Parent=hf
+			if h.result=="win" or h.result=="blackjack" then rl.TextColor3=T.winGreen
+			elseif h.result=="lose" or h.result=="bust" then rl.TextColor3=T.losePink
+			else rl.TextColor3=T.pushYel end
+		end
+
+		local cf=Instance.new("Frame"); cf.Size=UDim2.new(1,-16,0,100); cf.Position=UDim2.new(0,8,0,40)
+		cf.BackgroundTransparency=1; cf.ZIndex=3; cf.Parent=hf
+		for j,card in ipairs(h.cards) do
+			local cu=makeCard(card.rank,card.suit,false)
+			cu.Position=UDim2.new(0,(j-1)*72,0,0); cu.Parent=cf
+			if animate then task.delay((j-1)*0.35, function() animateCardIn(cu) end) end
+		end
+
+		if n>1 then
+			local bl=Instance.new("TextLabel"); bl.Size=UDim2.new(1,-8,0,14); bl.Position=UDim2.new(0,8,1,-18)
+			bl.BackgroundTransparency=1; bl.Text="$"..h.bet; bl.TextColor3=T.textMuted; bl.TextSize=10
+			bl.Font=Enum.Font.Gotham; bl.TextXAlignment=Enum.TextXAlignment.Left; bl.ZIndex=4; bl.Parent=hf
+		end
+	end
+end
+
+-- ══════════════════════════════════════════
+-- PHASE CONTROL
+-- ══════════════════════════════════════════
+local function hideAll()
+	chipFrame.Visible=false
+	for _,b in ipairs({clearBtn,dealBtn,hitBtn,standBtn,doubleBtn,splitBtn,replayBtn,insYesBtn,insNoBtn}) do b.Visible=false end
+end
+
+local function enterBetting()
+	currentBet=0; betLbl.Text="$0"; msgLbl.Text="Place your bet"; msgLbl.TextColor3=T.textDim
+	clearFrame(dealerCards); clearFrame(handsCont); dtLbl.Text=""
+	hideAll(); chipFrame.Visible=true; clearBtn.Visible=true; dealBtn.Visible=true
+	posCenter({clearBtn, dealBtn})
+end
+
+local function flashMsg(text,color)
+	msgLbl.TextColor3=color or T.accent; msgLbl.Text=text; msgLbl.TextTransparency=1
+	TweenService:Create(msgLbl,TweenInfo.new(0.35,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),{TextTransparency=0}):Play()
+end
+
+local isFirstState = true
+
+BJUpdate.OnClientEvent:Connect(function(state)
+	if state.phase=="betting" then
+		if state.message and state.message~="" then flashMsg(state.message,T.red)
+		else enterBetting() end
+		isFirstState=true; return
+	end
+
+	local animate = isFirstState
+	isFirstState = false
+
+	betLbl.Text = "$"..string.format("%g",state.totalBet or 0)
+	hideAll()
+
+	-- ── PLAYING / INSURANCE PHASE ──
+	if state.phase=="playing" or state.phase=="insurance" then
+		if state.dealerHand then
+			if animate then
+				renderHandAnimated(dealerCards, state.dealerHand, true, 0.4)
+			else
+				renderHandInstant(dealerCards, state.dealerHand, true)
+			end
+			dtLbl.Text = "?"
+		end
+		if state.hands then
+			renderAllHands(state.hands, state.activeHand, state.phase, animate)
+		end
+
+		if state.phase=="playing" then
+			-- Delay showing action buttons until initial deal animation finishes
+			if animate then
+				local dealTime = 0.4 * 2 + 0.35 * 2 + 0.3 -- dealer cards + player cards + buffer
+				task.delay(dealTime, function()
+					hitBtn.Visible=true; standBtn.Visible=true
+					doubleBtn.Visible=state.canDouble or false; splitBtn.Visible=state.canSplit or false
+					local btns={hitBtn,standBtn}
+					if state.canDouble then table.insert(btns,doubleBtn) end
+					if state.canSplit then table.insert(btns,splitBtn) end
+					posCenter(btns)
+				end)
+			else
+				hitBtn.Visible=true; standBtn.Visible=true
+				doubleBtn.Visible=state.canDouble or false; splitBtn.Visible=state.canSplit or false
+				local btns={hitBtn,standBtn}
+				if state.canDouble then table.insert(btns,doubleBtn) end
+				if state.canSplit then table.insert(btns,splitBtn) end
+				posCenter(btns)
+			end
+		elseif state.phase=="insurance" then
+			local cost=state.insuranceCost or 0
+			insYesBtn.Text="Insurance ($"..cost..")"
+			local dealTime = animate and (0.4*2+0.35*2+0.3) or 0
+			task.delay(dealTime, function()
+				insYesBtn.Visible=true; insNoBtn.Visible=true
+				posCenter({insYesBtn,insNoBtn})
+				flashMsg("Dealer shows Ace — Insurance?",T.orange)
+			end)
+		end
+
+		if state.message and state.message~="" and state.phase=="playing" and not animate then
+			flashMsg(state.message, T.accent)
+		end
+		return
+	end
+
+	-- ── DONE PHASE — DEALER REVEAL SEQUENCE ──
+	if state.phase=="done" then
+		if state.hands then
+			renderAllHands(state.hands, state.activeHand, "done", false)
+		end
+
+		-- Dealer reveal animation (slow, one card at a time)
+		local revealTime = 0
+		if state.dealerHand then
+			revealTime = revealDealerSequence(state.dealerHand)
+		end
+
+		-- Show result message AFTER dealer finishes drawing
+		if state.message and state.message~="" then
+			task.delay(revealTime, function()
+				local col=T.accent
+				if state.result=="win" or state.result=="blackjack" then col=T.winGreen
+				elseif state.result=="lose" or state.result=="bust" then col=T.losePink
+				elseif state.result=="push" then col=T.pushYel end
+				flashMsg(state.message, col)
+				if state.result=="win" or state.result=="blackjack" then sndWin:Play() end
+			end)
+		end
+
+		-- Show "Bet Again" AFTER result
+		task.delay(revealTime + 0.5, function()
+			replayBtn.Visible=true; posCenter({replayBtn})
+		end)
+
+		-- Final dealer total AFTER all cards
+		task.delay(revealTime, function()
+			dtLbl.Text = tostring(state.dealerTotal or "")
+		end)
+	end
+end)
+
+-- ══════════════════════════════════════════
+-- BUTTON WIRING
+-- ══════════════════════════════════════════
+closeBtn.MouseButton1Click:Connect(function() BJAction:FireServer("close"); gui.Enabled=false end)
+clearBtn.MouseButton1Click:Connect(function() currentBet=0; betLbl.Text="$0" end)
+dealBtn.MouseButton1Click:Connect(function()
+	if currentBet>=100 then isFirstState=true; BJAction:FireServer("bet",currentBet)
+	else flashMsg("Min bet $100",T.red) end
+end)
+hitBtn.MouseButton1Click:Connect(function() BJAction:FireServer("hit") end)
+standBtn.MouseButton1Click:Connect(function() BJAction:FireServer("stand") end)
+doubleBtn.MouseButton1Click:Connect(function() BJAction:FireServer("double") end)
+splitBtn.MouseButton1Click:Connect(function() BJAction:FireServer("split") end)
+insYesBtn.MouseButton1Click:Connect(function() BJAction:FireServer("insurance_yes") end)
+insNoBtn.MouseButton1Click:Connect(function() BJAction:FireServer("insurance_no") end)
+replayBtn.MouseButton1Click:Connect(function() enterBetting() end)
+
+OpenBJ.OnClientEvent:Connect(function() gui.Enabled=true; enterBetting() end)
+print("BlackjackClient: Loaded!")
