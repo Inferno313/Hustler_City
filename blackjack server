@@ -1,0 +1,268 @@
+-- ============================================================
+--  HUSTLE CITY: Casino Empire
+--  Script: BlackjackServer (ServerScriptService > Script)
+-- ============================================================
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players           = game:GetService("Players")
+local DataManager       = require(script.Parent.DataStoreManager)
+
+local Events = ReplicatedStorage:WaitForChild("Events")
+
+-- Auto-create the two RemoteEvents if they don't exist yet
+local function getOrCreate(name, class)
+	local e = Events:FindFirstChild(name)
+	if e then return e end
+	local new = Instance.new(class)
+	new.Name   = name
+	new.Parent = Events
+	return new
+end
+
+local BlackjackAction  = getOrCreate("BlackjackAction",  "RemoteEvent")
+local BlackjackUpdate  = getOrCreate("BlackjackUpdate",  "RemoteEvent")
+local UpdateCurrency   = Events:WaitForChild("UpdateCurrency")
+
+-- ============================================================
+-- CARD SYSTEM
+-- ============================================================
+local SUITS = {"♠","♥","♦","♣"}
+local RANKS = {"A","2","3","4","5","6","7","8","9","10","J","Q","K"}
+
+local function newDeck()
+	local deck = {}
+	for _, suit in ipairs(SUITS) do
+		for _, rank in ipairs(RANKS) do
+			table.insert(deck, {rank = rank, suit = suit})
+		end
+	end
+	for i = #deck, 2, -1 do
+		local j = math.random(1, i)
+		deck[i], deck[j] = deck[j], deck[i]
+	end
+	return deck
+end
+
+local function cardValue(rank)
+	if rank == "A"  then return 11 end
+	if rank == "J" or rank == "Q" or rank == "K" then return 10 end
+	return tonumber(rank)
+end
+
+local function handTotal(hand)
+	local total, aces = 0, 0
+	for _, card in ipairs(hand) do
+		total += cardValue(card.rank)
+		if card.rank == "A" then aces += 1 end
+	end
+	while total > 21 and aces > 0 do
+		total -= 10
+		aces  -= 1
+	end
+	return total
+end
+
+local function isBust(hand)      return handTotal(hand) > 21 end
+local function isBlackjack(hand) return #hand == 2 and handTotal(hand) == 21 end
+
+-- ============================================================
+-- CONSTANTS
+-- ============================================================
+local MIN_BET = 100
+local MAX_BET = 10000
+
+-- ============================================================
+-- PER-PLAYER GAME STATE
+-- ============================================================
+local games = {}   -- games[player] = { deck, playerHand, dealerHand, bet, phase }
+
+-- ============================================================
+-- HELPERS
+-- ============================================================
+local function modifyCash(player, delta)
+	local data = DataManager:GetData(player)
+	if not data then return false end
+	data.Cash = math.max(0, data.Cash + delta)
+	UpdateCurrency:FireClient(player, data.Cash)
+	return true
+end
+
+local function sendState(player)
+	local g = games[player]
+	if not g then return end
+	local data = DataManager:GetData(player)
+
+	-- During play, hide dealer's second card
+	local visibleDealer = g.dealerHand
+	local visibleDealerTotal = handTotal(g.dealerHand)
+	if g.phase == "playing" then
+		visibleDealer      = {g.dealerHand[1], {rank = "?", suit = "?"}}
+		visibleDealerTotal = cardValue(g.dealerHand[1].rank)
+	end
+
+	BlackjackUpdate:FireClient(player, {
+		phase        = g.phase,
+		playerHand   = g.playerHand,
+		dealerHand   = visibleDealer,
+		playerTotal  = handTotal(g.playerHand),
+		dealerTotal  = visibleDealerTotal,
+		bet          = g.bet,
+		cash         = data and data.Cash or 0,
+		result       = g.result,
+		canDouble    = g.canDouble,
+	})
+end
+
+local function drawCard(g)
+	-- Reshuffle into the same deck if running low
+	if #g.deck < 15 then
+		local fresh = newDeck()
+		for _, c in ipairs(fresh) do table.insert(g.deck, c) end
+	end
+	return table.remove(g.deck, 1)
+end
+
+-- ============================================================
+-- GAME ACTIONS
+-- ============================================================
+
+-- Forward-declare so playerHit can call playerStand
+local playerStand
+
+local function startGame(player, bet)
+	local data = DataManager:GetData(player)
+	if not data then return end
+
+	bet = math.floor(tonumber(bet) or 0)
+
+	if bet < MIN_BET or bet > MAX_BET then
+		BlackjackUpdate:FireClient(player, {error = string.format("Bet must be $%d – $%d", MIN_BET, MAX_BET)})
+		return
+	end
+	if data.Cash < bet then
+		BlackjackUpdate:FireClient(player, {error = "Not enough cash!"})
+		return
+	end
+
+	-- Deduct bet up front
+	modifyCash(player, -bet)
+
+	-- Reuse existing deck or create fresh
+	local g     = games[player] or {}
+	g.deck       = g.deck or newDeck()
+	g.bet        = bet
+	g.phase      = "playing"
+	g.result     = nil
+	g.playerHand = {drawCard(g), drawCard(g)}
+	g.dealerHand = {drawCard(g), drawCard(g)}
+	g.canDouble  = (data.Cash - bet >= bet)   -- enough left to double
+	games[player] = g
+
+	-- Immediate blackjack checks
+	local pBJ = isBlackjack(g.playerHand)
+	local dBJ = isBlackjack(g.dealerHand)
+
+	if pBJ and dBJ then
+		g.phase  = "done"
+		g.result = "push"
+		modifyCash(player, bet)                         -- return bet
+	elseif pBJ then
+		g.phase  = "done"
+		g.result = "blackjack"
+		modifyCash(player, math.floor(bet * 2.5))       -- 3:2 payout
+	elseif dBJ then
+		g.phase  = "done"
+		g.result = "lose"
+		-- bet already deducted, nothing to return
+	end
+
+	sendState(player)
+end
+
+local function playerHit(player)
+	local g = games[player]
+	if not g or g.phase ~= "playing" then return end
+
+	g.canDouble = false
+	table.insert(g.playerHand, drawCard(g))
+
+	if isBust(g.playerHand) then
+		g.phase  = "done"
+		g.result = "bust"
+		sendState(player)
+	elseif handTotal(g.playerHand) == 21 then
+		playerStand(player)    -- auto-stand on 21
+	else
+		sendState(player)
+	end
+end
+
+playerStand = function(player)
+	local g = games[player]
+	if not g or g.phase ~= "playing" then return end
+
+	g.phase = "dealer"
+
+	-- Dealer draws until 17+
+	while handTotal(g.dealerHand) < 17 do
+		table.insert(g.dealerHand, drawCard(g))
+	end
+
+	local pTotal = handTotal(g.playerHand)
+	local dTotal = handTotal(g.dealerHand)
+	g.phase = "done"
+
+	if isBust(g.dealerHand) or pTotal > dTotal then
+		g.result = "win"
+		modifyCash(player, g.bet * 2)
+	elseif pTotal == dTotal then
+		g.result = "push"
+		modifyCash(player, g.bet)
+	else
+		g.result = "lose"
+	end
+
+	sendState(player)
+end
+
+local function playerDouble(player)
+	local g = games[player]
+	if not g or g.phase ~= "playing" or not g.canDouble then return end
+
+	local data = DataManager:GetData(player)
+	if not data or data.Cash < g.bet then
+		BlackjackUpdate:FireClient(player, {error = "Not enough cash to double!"})
+		return
+	end
+
+	modifyCash(player, -g.bet)
+	g.bet       = g.bet * 2
+	g.canDouble = false
+
+	table.insert(g.playerHand, drawCard(g))
+
+	if isBust(g.playerHand) then
+		g.phase  = "done"
+		g.result = "bust"
+		sendState(player)
+	else
+		playerStand(player)
+	end
+end
+
+-- ============================================================
+-- EVENT ROUTING
+-- ============================================================
+BlackjackAction.OnServerEvent:Connect(function(player, action, value)
+	if     action == "bet"    then startGame(player, value)
+	elseif action == "hit"    then playerHit(player)
+	elseif action == "stand"  then playerStand(player)
+	elseif action == "double" then playerDouble(player)
+	elseif action == "leave"  then games[player] = nil
+	end
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	games[player] = nil
+end)
+
+print("[HustleCity] 🃏 BlackjackServer loaded!")
