@@ -1,0 +1,348 @@
+-- BlackjackServer | Script in ServerScriptService
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SSS = game:GetService("ServerScriptService")
+
+local DataManager = require(SSS:WaitForChild("DataStoreManager", 10))
+print("BlackjackServer: Starting...")
+
+local Events = ReplicatedStorage:FindFirstChild("Events")
+if not Events then
+	Events = Instance.new("Folder"); Events.Name = "Events"; Events.Parent = ReplicatedStorage
+end
+
+local function getOrCreate(name, class)
+	local e = Events:FindFirstChild(name)
+	if e then return e end
+	local new = Instance.new(class); new.Name = name; new.Parent = Events
+	return new
+end
+
+local BlackjackAction = getOrCreate("BlackjackAction", "RemoteEvent")
+local BlackjackUpdate = getOrCreate("BlackjackUpdate", "RemoteEvent")
+local OpenBlackjack   = getOrCreate("OpenBlackjack",   "RemoteEvent")
+local UpdateCurrency  = Events:FindFirstChild("UpdateCurrency")
+
+print("BlackjackServer: Events ready")
+
+local SUITS = {"spade","club","heart","diamond"}
+local RANKS = {"A","2","3","4","5","6","7","8","9","10","J","Q","K"}
+
+local function cardValue(rank)
+	if rank == "A" then return 11 end
+	if rank == "J" or rank == "Q" or rank == "K" then return 10 end
+	return tonumber(rank)
+end
+
+local function newDeck()
+	local deck = {}
+	for _, suit in ipairs(SUITS) do
+		for _, rank in ipairs(RANKS) do
+			table.insert(deck, {rank=rank, suit=suit, value=cardValue(rank)})
+		end
+	end
+	for i = #deck, 2, -1 do
+		local j = math.random(1, i)
+		deck[i], deck[j] = deck[j], deck[i]
+	end
+	return deck
+end
+
+local function handTotal(hand)
+	local total, aces = 0, 0
+	for _, card in ipairs(hand) do
+		total += card.value
+		if card.rank == "A" then aces += 1 end
+	end
+	while total > 21 and aces > 0 do
+		total -= 10; aces -= 1
+	end
+	return total
+end
+
+local function modifyCash(player, amount)
+	local ok, data = pcall(function() return DataManager:GetData(player) end)
+	if ok and data then
+		data.Cash = math.max(0, (data.Cash or 0) + amount)
+		if UpdateCurrency then UpdateCurrency:FireClient(player, data.Cash) end
+		return data.Cash
+	end
+end
+
+local sessions = {}
+
+local function sendState(player, extra)
+	local s = sessions[player]
+	if not s then return end
+
+	local hands = {}
+	for i, h in ipairs(s.hands) do
+		hands[i] = {
+			cards = h.cards,
+			total = handTotal(h.cards),
+			bet = h.bet,
+			done = h.done,
+			result = h.result or "",
+			message = h.message or "",
+		}
+	end
+
+	BlackjackUpdate:FireClient(player, {
+		phase        = s.phase,
+		hands        = hands,
+		activeHand   = s.activeHand,
+		dealerHand   = s.dealerHand,
+		dealerTotal  = handTotal(s.dealerHand),
+		hideDealer   = s.phase == "playing",
+		message      = extra and extra.message or "",
+		result       = extra and extra.result or "",
+		canSplit     = s.phase == "playing" and s.activeHand <= #s.hands and not s.hands[s.activeHand].done
+			and #s.hands[s.activeHand].cards == 2
+			and s.hands[s.activeHand].cards[1].value == s.hands[s.activeHand].cards[2].value
+			and #s.hands < 4,
+		canDouble    = s.phase == "playing" and s.activeHand <= #s.hands
+			and #s.hands[s.activeHand].cards == 2
+			and not s.hands[s.activeHand].done,
+		totalBet     = s.totalBet or 0,
+	})
+end
+
+local function advanceHand(player)
+	local s = sessions[player]
+	s.activeHand += 1
+
+	while s.activeHand <= #s.hands do
+		local h = s.hands[s.activeHand]
+		if not h.done then
+			if #h.cards == 1 then
+				table.insert(h.cards, table.remove(s.deck))
+			end
+			if handTotal(h.cards) == 21 and #h.cards == 2 then
+				h.done = true
+				h.result = "blackjack"
+				s.activeHand += 1
+			else
+				sendState(player)
+				return
+			end
+		else
+			s.activeHand += 1
+		end
+	end
+
+	-- All hands done — dealer plays
+	s.phase = "dealer"
+	while handTotal(s.dealerHand) < 17 do
+		table.insert(s.dealerHand, table.remove(s.deck))
+	end
+
+	local dt = handTotal(s.dealerHand)
+	local totalWin = 0
+	local totalBet = 0
+
+	for _, h in ipairs(s.hands) do
+		local pt = handTotal(h.cards)
+		totalBet += h.bet
+		if h.result == "bust" then
+			h.message = "Bust"
+		elseif h.result == "blackjack" then
+			local payout = math.floor(h.bet * 2.5)
+			modifyCash(player, payout)
+			totalWin += payout
+			h.message = "Blackjack!"
+		elseif dt > 21 then
+			modifyCash(player, h.bet * 2)
+			totalWin += h.bet * 2
+			h.result = "win"; h.message = "Dealer bust!"
+		elseif pt > dt then
+			modifyCash(player, h.bet * 2)
+			totalWin += h.bet * 2
+			h.result = "win"; h.message = "Win!"
+		elseif pt == dt then
+			modifyCash(player, h.bet)
+			totalWin += h.bet
+			h.result = "push"; h.message = "Push"
+		else
+			h.result = "lose"; h.message = "Lose"
+		end
+	end
+
+	s.phase = "done"
+	local profit = totalWin - totalBet
+	local msg
+	if profit > 0 then msg = "You won $"..profit.."!"
+	elseif profit == 0 then msg = "Break even"
+	else msg = "You lost $"..math.abs(profit) end
+
+	sendState(player, {message = msg, result = profit > 0 and "win" or profit == 0 and "push" or "lose"})
+	sessions[player] = nil
+end
+
+local function startGame(player, bet)
+	local ok, data = pcall(function() return DataManager:GetData(player) end)
+	if not ok or not data then
+		BlackjackUpdate:FireClient(player, {phase="betting", message="Error loading data."})
+		return
+	end
+	bet = tonumber(bet) or 0
+	if bet < 100 then BlackjackUpdate:FireClient(player, {phase="betting", message="Minimum bet is $100."}); return end
+	if bet > 10000 then BlackjackUpdate:FireClient(player, {phase="betting", message="Maximum bet is $10,000."}); return end
+	if data.Cash < bet then BlackjackUpdate:FireClient(player, {phase="betting", message="Not enough cash!"}); return end
+
+	modifyCash(player, -bet)
+	local deck = newDeck()
+	local playerHand = {table.remove(deck), table.remove(deck)}
+	local dealerHand = {table.remove(deck), table.remove(deck)}
+
+	sessions[player] = {
+		phase = "playing",
+		deck = deck,
+		dealerHand = dealerHand,
+		hands = {{cards = playerHand, bet = bet, done = false}},
+		activeHand = 1,
+		totalBet = bet,
+	}
+
+	-- Check natural blackjack
+	if handTotal(playerHand) == 21 then
+		local s = sessions[player]
+		s.hands[1].done = true
+		if handTotal(dealerHand) == 21 then
+			s.hands[1].result = "push"
+			s.hands[1].message = "Both blackjack — Push"
+			modifyCash(player, bet)
+			s.phase = "done"
+			sendState(player, {message="Push!", result="push"})
+			sessions[player] = nil
+		else
+			local payout = math.floor(bet * 2.5)
+			modifyCash(player, payout)
+			s.hands[1].result = "blackjack"
+			s.hands[1].message = "Blackjack!"
+			s.phase = "done"
+			sendState(player, {message="BLACKJACK! You win $"..(payout - bet), result="blackjack"})
+			sessions[player] = nil
+		end
+		return
+	end
+
+	sendState(player)
+end
+
+local function playerHit(player)
+	local s = sessions[player]
+	if not s or s.phase ~= "playing" then return end
+	local h = s.hands[s.activeHand]
+	if not h or h.done then return end
+	table.insert(h.cards, table.remove(s.deck))
+	local total = handTotal(h.cards)
+	if total > 21 then
+		h.done = true; h.result = "bust"; h.message = "Bust"
+		advanceHand(player)
+	elseif total == 21 then
+		h.done = true
+		advanceHand(player)
+	else
+		sendState(player)
+	end
+end
+
+local function playerStand(player)
+	local s = sessions[player]
+	if not s or s.phase ~= "playing" then return end
+	local h = s.hands[s.activeHand]
+	if not h or h.done then return end
+	h.done = true
+	advanceHand(player)
+end
+
+local function playerDouble(player)
+	local s = sessions[player]
+	if not s or s.phase ~= "playing" then return end
+	local h = s.hands[s.activeHand]
+	if not h or h.done or #h.cards ~= 2 then return end
+	local ok, data = pcall(function() return DataManager:GetData(player) end)
+	if not ok or not data or data.Cash < h.bet then
+		sendState(player, {message="Not enough cash to double!"}); return
+	end
+	modifyCash(player, -h.bet)
+	s.totalBet += h.bet
+	h.bet *= 2
+	table.insert(h.cards, table.remove(s.deck))
+	h.done = true
+	if handTotal(h.cards) > 21 then
+		h.result = "bust"; h.message = "Bust"
+	end
+	advanceHand(player)
+end
+
+local function playerSplit(player)
+	local s = sessions[player]
+	if not s or s.phase ~= "playing" then return end
+	local h = s.hands[s.activeHand]
+	if not h or h.done or #h.cards ~= 2 then return end
+	if h.cards[1].value ~= h.cards[2].value then return end
+	if #s.hands >= 4 then return end
+
+	local ok, data = pcall(function() return DataManager:GetData(player) end)
+	if not ok or not data or data.Cash < h.bet then
+		sendState(player, {message="Not enough cash to split!"}); return
+	end
+
+	modifyCash(player, -h.bet)
+	s.totalBet += h.bet
+
+	local splitCard = table.remove(h.cards, 2)
+	table.insert(h.cards, table.remove(s.deck))
+
+	local newHand = {cards = {splitCard}, bet = h.bet, done = false}
+	table.insert(s.hands, s.activeHand + 1, newHand)
+
+	if handTotal(h.cards) == 21 then
+		h.done = true
+		advanceHand(player)
+	else
+		sendState(player)
+	end
+end
+
+BlackjackAction.OnServerEvent:Connect(function(player, action, data)
+	if action == "bet"    then startGame(player, data)
+	elseif action == "hit"    then playerHit(player)
+	elseif action == "stand"  then playerStand(player)
+	elseif action == "double" then playerDouble(player)
+	elseif action == "split"  then playerSplit(player)
+	elseif action == "close"  then
+		local s = sessions[player]
+		if s then
+			for _, h in ipairs(s.hands) do
+				if not h.done then modifyCash(player, h.bet) end
+			end
+		end
+		sessions[player] = nil
+	end
+end)
+
+Players.PlayerRemoving:Connect(function(player) sessions[player] = nil end)
+
+task.spawn(function()
+	print("BlackjackServer: Looking for BlackjackTable...")
+	local tableModel = workspace:WaitForChild("BlackjackTable", 30)
+	if not tableModel then warn("BlackjackServer: BlackjackTable not found!"); return end
+	local root = tableModel.PrimaryPart or tableModel:FindFirstChildWhichIsA("BasePart", true)
+	if not root then warn("BlackjackServer: No BasePart!"); return end
+	for _, c in ipairs(root:GetChildren()) do
+		if c:IsA("ProximityPrompt") then c:Destroy() end
+	end
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.ActionText = "Play"
+	prompt.ObjectText = "Blackjack"
+	prompt.KeyboardKeyCode = Enum.KeyCode.E
+	prompt.MaxActivationDistance = 10
+	prompt.HoldDuration = 0
+	prompt.Parent = root
+	prompt.Triggered:Connect(function(p) OpenBlackjack:FireClient(p) end)
+	print("BlackjackServer: Ready!")
+end)
+
+print("BlackjackServer: Loaded!")
