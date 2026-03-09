@@ -1,0 +1,751 @@
+--[[
+	CoinflipClient.lua  v2
+	Place as a LocalScript in StarterPlayerScripts.
+
+	• Side picker — P1 picks Tung Tung or Tralalelo
+	• Bet entry with min $500 / max $50,000
+	• Waiting screen with "Flip vs House (5% fee)" button
+	• 3D coin-flip animation in ViewportFrame
+	• Win / lose result overlay
+--]]
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService        = game:GetService("RunService")
+local TweenService      = game:GetService("TweenService")
+
+local player    = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local TUNG_TUNG_ID  = "rbxassetid://125237730664411"
+local TRALALELO_ID  = "rbxassetid://91743837862476"
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- WAIT FOR REMOTE EVENTS
+-- ═══════════════════════════════════════════════════════════════════════════
+local events = ReplicatedStorage:WaitForChild("CoinflipEvents", 30)
+if not events then warn("[CoinflipClient] Events not found!") return end
+
+local ShowSidePicker = events:WaitForChild("ShowSidePicker")
+local ShowBetUI      = events:WaitForChild("ShowBetUI")
+local ShowWaitUI     = events:WaitForChild("ShowWaitUI")
+local ShowConfirmUI  = events:WaitForChild("ShowConfirmUI")
+local PlayFlipAnim   = events:WaitForChild("PlayFlipAnim")
+local ShowResult     = events:WaitForChild("ShowResult")
+local HideAllUI      = events:WaitForChild("HideAllUI")
+local SeatPlayer     = events:WaitForChild("SeatPlayer")
+local UnseatPlayer   = events:WaitForChild("UnseatPlayer")
+
+local PickSide       = events:WaitForChild("PickSide")
+local SubmitBet      = events:WaitForChild("SubmitBet")
+local FlipVsHouse    = events:WaitForChild("FlipVsHouse")
+local ConfirmBet     = events:WaitForChild("ConfirmBet")
+local DeclineBet     = events:WaitForChild("DeclineBet")
+local LeaveSeat      = events:WaitForChild("LeaveSeat")
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- COLOUR PALETTE
+-- ═══════════════════════════════════════════════════════════════════════════
+local P = {
+	BG         = Color3.fromRGB(12, 8, 20),
+	Panel      = Color3.fromRGB(22, 18, 35),
+	Gold       = Color3.fromRGB(212, 175, 55),
+	GoldBright = Color3.fromRGB(255, 215, 0),
+	White      = Color3.fromRGB(255, 255, 255),
+	Dim        = Color3.fromRGB(160, 150, 135),
+	Green      = Color3.fromRGB(40, 200, 80),
+	Red        = Color3.fromRGB(200, 40, 40),
+	BtnGold    = Color3.fromRGB(212, 175, 55),
+	BtnDark    = Color3.fromRGB(15, 10, 25),
+	Blue       = Color3.fromRGB(50, 120, 255),
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- UI HELPERS
+-- ═══════════════════════════════════════════════════════════════════════════
+local gui = Instance.new("ScreenGui")
+gui.Name           = "CoinflipUI"
+gui.ResetOnSpawn   = false
+gui.IgnoreGuiInset = true
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent         = playerGui
+
+local function new(class, props, children)
+	local i = Instance.new(class)
+	for k, v in pairs(props or {}) do i[k] = v end
+	for _, c in ipairs(children or {}) do c.Parent = i end
+	return i
+end
+
+local function corner(p, r) local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r or 10); c.Parent = p end
+local function stroke(p, t, col) local s = Instance.new("UIStroke"); s.Thickness = t or 2; s.Color = col or P.Gold; s.Parent = p end
+
+local function btn(text, size, pos, bg, fg)
+	local b = new("TextButton", {
+		Text = text, Size = size or UDim2.new(0.4,0,0,50),
+		Position = pos or UDim2.new(0.5,0,0.85,0), AnchorPoint = Vector2.new(0.5,0.5),
+		BackgroundColor3 = bg or P.BtnGold, TextColor3 = fg or P.BtnDark,
+		Font = Enum.Font.GothamBold, TextSize = 20, AutoButtonColor = true,
+	})
+	corner(b, 8)
+	return b
+end
+
+local function formatCash(n)
+	local s = tostring(math.floor(n))
+	local k; while true do s, k = s:gsub("^(-?%d+)(%d%d%d)", "%1,%2"); if k == 0 then break end end
+	return "$" .. s
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- STATE
+-- ═══════════════════════════════════════════════════════════════════════════
+local currentTable   = nil
+local savedCFrame    = nil
+local seatedSeatName = nil
+local mySide         = nil   -- "tung" or "trala"
+local dotsConn       = nil
+
+local function hideAll()
+	for _, child in ipairs(gui:GetChildren()) do
+		if child:IsA("Frame") then child.Visible = false end
+	end
+	if dotsConn then dotsConn:Disconnect(); dotsConn = nil end
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 1.  SIDE PICKER PANEL
+-- ═══════════════════════════════════════════════════════════════════════════
+local sidePanel = new("Frame", {
+	Name = "SidePanel", Size = UDim2.new(0,540,0,420),
+	Position = UDim2.new(0.5,0,0.5,0), AnchorPoint = Vector2.new(0.5,0.5),
+	BackgroundColor3 = P.Panel, Visible = false, Parent = gui,
+})
+corner(sidePanel, 16); stroke(sidePanel, 2, P.Gold)
+
+new("TextLabel", {
+	Text = "CHOOSE YOUR SIDE", Size = UDim2.new(1,0,0,45), Position = UDim2.new(0,0,0,10),
+	BackgroundTransparency = 1, TextColor3 = P.GoldBright, Font = Enum.Font.GothamBold, TextSize = 26,
+	Parent = sidePanel,
+})
+
+new("TextLabel", {
+	Text = "Pick which side of the coin you want to bet on",
+	Size = UDim2.new(0.9,0,0,25), Position = UDim2.new(0.05,0,0,55),
+	BackgroundTransparency = 1, TextColor3 = P.Dim, Font = Enum.Font.GothamMedium, TextSize = 15,
+	Parent = sidePanel,
+})
+
+-- Tung Tung card (left) — coin-shaped circular image
+local tungCard = new("TextButton", {
+	Name = "TungCard", Text = "",
+	Size = UDim2.new(0,200,0,270), Position = UDim2.new(0.17,0,0.55,0), AnchorPoint = Vector2.new(0.5,0.5),
+	BackgroundTransparency = 1, AutoButtonColor = false, Parent = sidePanel,
+})
+
+-- Circular coin-shaped image holder
+local tungCoinFrame = new("Frame", {
+	Size = UDim2.new(0,150,0,150), Position = UDim2.new(0.5,0,0.04,0), AnchorPoint = Vector2.new(0.5,0),
+	BackgroundColor3 = Color3.fromRGB(218, 185, 65), Parent = tungCard,
+})
+corner(tungCoinFrame, 75)  -- half of 150 = perfect circle
+stroke(tungCoinFrame, 3, Color3.fromRGB(180, 150, 30))
+new("ImageLabel", {
+	Image = TUNG_TUNG_ID, Size = UDim2.new(0.92,0,0.92,0), Position = UDim2.new(0.04,0,0.04,0),
+	BackgroundTransparency = 1, ScaleType = Enum.ScaleType.Crop, Parent = tungCoinFrame,
+})
+corner(tungCoinFrame:FindFirstChild("ImageLabel") or tungCoinFrame:GetChildren()[#tungCoinFrame:GetChildren()], 70)
+
+new("TextLabel", {
+	Text = "TUNG TUNG", Size = UDim2.new(1,0,0,28), Position = UDim2.new(0,0,0.65,0),
+	BackgroundTransparency = 1, TextColor3 = P.GoldBright, Font = Enum.Font.GothamBold, TextSize = 18, Parent = tungCard,
+})
+new("TextLabel", {
+	Text = "Tung Sahur", Size = UDim2.new(1,0,0,22), Position = UDim2.new(0,0,0.78,0),
+	BackgroundTransparency = 1, TextColor3 = P.Dim, Font = Enum.Font.GothamMedium, TextSize = 14, Parent = tungCard,
+})
+
+-- Tralalelo card (right) — coin-shaped circular image
+local tralaCard = new("TextButton", {
+	Name = "TralaCard", Text = "",
+	Size = UDim2.new(0,200,0,270), Position = UDim2.new(0.83,0,0.55,0), AnchorPoint = Vector2.new(0.5,0.5),
+	BackgroundTransparency = 1, AutoButtonColor = false, Parent = sidePanel,
+})
+
+local tralaCoinFrame = new("Frame", {
+	Size = UDim2.new(0,150,0,150), Position = UDim2.new(0.5,0,0.04,0), AnchorPoint = Vector2.new(0.5,0),
+	BackgroundColor3 = Color3.fromRGB(218, 185, 65), Parent = tralaCard,
+})
+corner(tralaCoinFrame, 75)
+stroke(tralaCoinFrame, 3, Color3.fromRGB(180, 150, 30))
+new("ImageLabel", {
+	Image = TRALALELO_ID, Size = UDim2.new(0.92,0,0.92,0), Position = UDim2.new(0.04,0,0.04,0),
+	BackgroundTransparency = 1, ScaleType = Enum.ScaleType.Crop, Parent = tralaCoinFrame,
+})
+corner(tralaCoinFrame:FindFirstChild("ImageLabel") or tralaCoinFrame:GetChildren()[#tralaCoinFrame:GetChildren()], 70)
+
+new("TextLabel", {
+	Text = "TRALALELO", Size = UDim2.new(1,0,0,28), Position = UDim2.new(0,0,0.65,0),
+	BackgroundTransparency = 1, TextColor3 = P.GoldBright, Font = Enum.Font.GothamBold, TextSize = 18, Parent = tralaCard,
+})
+new("TextLabel", {
+	Text = "Tralala", Size = UDim2.new(1,0,0,22), Position = UDim2.new(0,0,0.78,0),
+	BackgroundTransparency = 1, TextColor3 = P.Dim, Font = Enum.Font.GothamMedium, TextSize = 14, Parent = tralaCard,
+})
+
+local sideLeaveBtn = btn("LEAVE", UDim2.new(0.25,0,0,40), UDim2.new(0.5,0,0.95,0), P.Red, P.White)
+sideLeaveBtn.Parent = sidePanel
+
+-- Hover / click effects
+local function highlightCard(card, on)
+	local st = card:FindFirstChildOfClass("UIStroke")
+	if st then
+		st.Color     = on and P.Green or P.Gold
+		st.Thickness = on and 3 or 2
+	end
+	card.BackgroundColor3 = on and Color3.fromRGB(25, 50, 30) or Color3.fromRGB(30, 25, 45)
+end
+
+tungCard.MouseButton1Click:Connect(function()
+	if not currentTable then return end
+	mySide = "tung"
+	PickSide:FireServer(currentTable, "tung")
+end)
+
+tralaCard.MouseButton1Click:Connect(function()
+	if not currentTable then return end
+	mySide = "trala"
+	PickSide:FireServer(currentTable, "trala")
+end)
+
+tungCard.MouseEnter:Connect(function() highlightCard(tungCard, true) end)
+tungCard.MouseLeave:Connect(function() highlightCard(tungCard, false) end)
+tralaCard.MouseEnter:Connect(function() highlightCard(tralaCard, true) end)
+tralaCard.MouseLeave:Connect(function() highlightCard(tralaCard, false) end)
+
+sideLeaveBtn.MouseButton1Click:Connect(function()
+	if currentTable then LeaveSeat:FireServer(currentTable) end
+	hideAll()
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 2.  BET ENTRY PANEL
+-- ═══════════════════════════════════════════════════════════════════════════
+local betPanel = new("Frame", {
+	Name = "BetPanel", Size = UDim2.new(0,440,0,340),
+	Position = UDim2.new(0.5,0,0.5,0), AnchorPoint = Vector2.new(0.5,0.5),
+	BackgroundColor3 = P.Panel, Visible = false, Parent = gui,
+})
+corner(betPanel, 14); stroke(betPanel, 2, P.Gold)
+
+new("TextLabel", {
+	Text = "PLACE YOUR BET", Size = UDim2.new(1,0,0,45), Position = UDim2.new(0,0,0,8),
+	BackgroundTransparency = 1, TextColor3 = P.GoldBright, Font = Enum.Font.GothamBold, TextSize = 26, Parent = betPanel,
+})
+
+local betSideImg = new("ImageLabel", {
+	Size = UDim2.new(0,50,0,50), Position = UDim2.new(0.5,0,0,55), AnchorPoint = Vector2.new(0.5,0),
+	BackgroundTransparency = 1, ScaleType = Enum.ScaleType.Fit, Parent = betPanel,
+})
+
+local betInput = new("TextBox", {
+	Name = "BetInput", PlaceholderText = "Enter amount...", Text = "",
+	Size = UDim2.new(0.7,0,0,50), Position = UDim2.new(0.15,0,0,115),
+	BackgroundColor3 = Color3.fromRGB(35,30,50), TextColor3 = P.White,
+	PlaceholderColor3 = P.Dim, Font = Enum.Font.GothamBold, TextSize = 24,
+	ClearTextOnFocus = true, Parent = betPanel,
+})
+corner(betInput, 8); stroke(betInput, 1, P.Gold)
+
+local betError = new("TextLabel", {
+	Name = "BetError", Text = "", Size = UDim2.new(0.8,0,0,25), Position = UDim2.new(0.1,0,0,172),
+	BackgroundTransparency = 1, TextColor3 = P.Red, Font = Enum.Font.GothamMedium, TextSize = 16, Parent = betPanel,
+})
+
+local readyBtn = btn("READY", UDim2.new(0.35,0,0,48), UDim2.new(0.3,0,0,230), P.BtnGold, P.BtnDark)
+readyBtn.Parent = betPanel
+
+local betLeaveBtn = btn("LEAVE", UDim2.new(0.25,0,0,48), UDim2.new(0.7,0,0,230), P.Red, P.White)
+betLeaveBtn.Parent = betPanel
+
+local betHint = new("TextLabel", {
+	Name = "BetHint", Text = "", Size = UDim2.new(0.8,0,0,22), Position = UDim2.new(0.1,0,0,290),
+	BackgroundTransparency = 1, TextColor3 = P.Dim, Font = Enum.Font.Gotham, TextSize = 14, Parent = betPanel,
+})
+
+readyBtn.MouseButton1Click:Connect(function()
+	if not currentTable then return end
+	local amount = tonumber((betInput.Text:gsub("[^%d]", "")))
+	if not amount or amount <= 0 then
+		betError.Text = "Enter a valid number."
+		return
+	end
+	betError.Text = ""
+	SubmitBet:FireServer(currentTable, amount)
+end)
+
+betLeaveBtn.MouseButton1Click:Connect(function()
+	if currentTable then LeaveSeat:FireServer(currentTable) end
+	hideAll()
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 3.  WAITING PANEL  (with Flip vs House button)
+-- ═══════════════════════════════════════════════════════════════════════════
+local waitPanel = new("Frame", {
+	Name = "WaitPanel", Size = UDim2.new(0,440,0,300),
+	Position = UDim2.new(0.5,0,0.5,0), AnchorPoint = Vector2.new(0.5,0.5),
+	BackgroundColor3 = P.Panel, Visible = false, Parent = gui,
+})
+corner(waitPanel, 14); stroke(waitPanel, 2, P.Gold)
+
+local waitBetLabel = new("TextLabel", {
+	Text = "Your bet: $0", Size = UDim2.new(1,0,0,40), Position = UDim2.new(0,0,0,12),
+	BackgroundTransparency = 1, TextColor3 = P.GoldBright, Font = Enum.Font.GothamBold, TextSize = 24, Parent = waitPanel,
+})
+
+new("TextLabel", {
+	Text = "Waiting for an opponent...", Size = UDim2.new(1,0,0,30), Position = UDim2.new(0,0,0,55),
+	BackgroundTransparency = 1, TextColor3 = P.Dim, Font = Enum.Font.GothamMedium, TextSize = 18, Parent = waitPanel,
+})
+
+local dotsLabel = new("TextLabel", {
+	Text = ".", Size = UDim2.new(1,0,0,30), Position = UDim2.new(0,0,0,82),
+	BackgroundTransparency = 1, TextColor3 = P.Gold, Font = Enum.Font.GothamBold, TextSize = 30, Parent = waitPanel,
+})
+
+-- Divider line
+new("Frame", {
+	Size = UDim2.new(0.8,0,0,1), Position = UDim2.new(0.1,0,0,120),
+	BackgroundColor3 = P.Gold, BackgroundTransparency = 0.5, BorderSizePixel = 0, Parent = waitPanel,
+})
+
+new("TextLabel", {
+	Text = "or skip the wait:", Size = UDim2.new(1,0,0,22), Position = UDim2.new(0,0,0,128),
+	BackgroundTransparency = 1, TextColor3 = P.Dim, Font = Enum.Font.Gotham, TextSize = 14, Parent = waitPanel,
+})
+
+local houseBtn = btn("FLIP VS HOUSE", UDim2.new(0.55,0,0,48), UDim2.new(0.5,0,0,178), P.Blue, P.White)
+houseBtn.Parent = waitPanel
+
+local houseFeeLabel = new("TextLabel", {
+	Name = "HouseFee", Text = "(5% fee: $0)", Size = UDim2.new(1,0,0,20), Position = UDim2.new(0,0,0,208),
+	BackgroundTransparency = 1, TextColor3 = P.Dim, Font = Enum.Font.Gotham, TextSize = 13, Parent = waitPanel,
+})
+
+local waitLeaveBtn = btn("LEAVE TABLE", UDim2.new(0.4,0,0,42), UDim2.new(0.5,0,0,260), P.Red, P.White)
+waitLeaveBtn.Parent = waitPanel
+
+local function startDots()
+	if dotsConn then dotsConn:Disconnect() end
+	local t = 0
+	dotsConn = RunService.Heartbeat:Connect(function(dt)
+		t += dt; dotsLabel.Text = string.rep(".", math.floor(t*2) % 4 + 1)
+	end)
+end
+
+houseBtn.MouseButton1Click:Connect(function()
+	if currentTable then FlipVsHouse:FireServer(currentTable) end
+end)
+
+waitLeaveBtn.MouseButton1Click:Connect(function()
+	if currentTable then LeaveSeat:FireServer(currentTable) end
+	hideAll()
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 4.  CONFIRM PANEL  (Player 2)
+-- ═══════════════════════════════════════════════════════════════════════════
+local confirmPanel = new("Frame", {
+	Name = "ConfirmPanel", Size = UDim2.new(0,460,0,340),
+	Position = UDim2.new(0.5,0,0.5,0), AnchorPoint = Vector2.new(0.5,0.5),
+	BackgroundColor3 = P.Panel, Visible = false, Parent = gui,
+})
+corner(confirmPanel, 14); stroke(confirmPanel, 2, P.Gold)
+
+new("TextLabel", {
+	Text = "COINFLIP CHALLENGE", Size = UDim2.new(1,0,0,40), Position = UDim2.new(0,0,0,10),
+	BackgroundTransparency = 1, TextColor3 = P.GoldBright, Font = Enum.Font.GothamBold, TextSize = 24, Parent = confirmPanel,
+})
+
+local confirmInfo = new("TextLabel", {
+	Text = "", Size = UDim2.new(0.85,0,0,50), Position = UDim2.new(0.075,0,0,55),
+	BackgroundTransparency = 1, TextColor3 = P.White, Font = Enum.Font.GothamMedium, TextSize = 17,
+	TextWrapped = true, Parent = confirmPanel,
+})
+
+local confirmBetDisplay = new("TextLabel", {
+	Text = "$0", Size = UDim2.new(1,0,0,45), Position = UDim2.new(0,0,0,110),
+	BackgroundTransparency = 1, TextColor3 = P.GoldBright, Font = Enum.Font.GothamBold, TextSize = 36, Parent = confirmPanel,
+})
+
+local confirmSideImg = new("ImageLabel", {
+	Size = UDim2.new(0,60,0,60), Position = UDim2.new(0.5,0,0,160), AnchorPoint = Vector2.new(0.5,0),
+	BackgroundTransparency = 1, ScaleType = Enum.ScaleType.Fit, Parent = confirmPanel,
+})
+
+local confirmSideLabel = new("TextLabel", {
+	Text = "Your side: ???", Size = UDim2.new(1,0,0,24), Position = UDim2.new(0,0,0,225),
+	BackgroundTransparency = 1, TextColor3 = P.Dim, Font = Enum.Font.GothamMedium, TextSize = 15, Parent = confirmPanel,
+})
+
+local confirmBtn = btn("CONFIRM", UDim2.new(0.35,0,0,48), UDim2.new(0.28,0,0,280), P.Green, P.White)
+confirmBtn.Parent = confirmPanel
+
+local declineBtn = btn("DECLINE", UDim2.new(0.35,0,0,48), UDim2.new(0.72,0,0,280), P.Red, P.White)
+declineBtn.Parent = confirmPanel
+
+confirmBtn.MouseButton1Click:Connect(function()
+	if currentTable then ConfirmBet:FireServer(currentTable) end
+end)
+
+declineBtn.MouseButton1Click:Connect(function()
+	if currentTable then DeclineBet:FireServer(currentTable) end
+	hideAll()
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 5.  FLIP ANIMATION PANEL
+-- ═══════════════════════════════════════════════════════════════════════════
+local flipPanel = new("Frame", {
+	Name = "FlipPanel", Size = UDim2.new(1,0,1,0),
+	BackgroundColor3 = P.BG, BackgroundTransparency = 0.12, Visible = false, Parent = gui,
+})
+
+new("TextLabel", {
+	Text = "VS", Size = UDim2.new(0,80,0,50),
+	Position = UDim2.new(0.5,0,0.12,0), AnchorPoint = Vector2.new(0.5,0.5),
+	BackgroundTransparency = 1, TextColor3 = P.GoldBright, Font = Enum.Font.GothamBold, TextSize = 40, Parent = flipPanel,
+})
+
+-- Left portrait — coin-shaped circle with name underneath
+local leftFrame = new("Frame", {
+	Size = UDim2.new(0,180,0,260), Position = UDim2.new(0.18,0,0.14,0), AnchorPoint = Vector2.new(0.5,0.5),
+	BackgroundTransparency = 1, Parent = flipPanel,
+})
+
+local leftCoinBg = new("Frame", {
+	Size = UDim2.new(0,150,0,150), Position = UDim2.new(0.5,0,0,0), AnchorPoint = Vector2.new(0.5,0),
+	BackgroundColor3 = Color3.fromRGB(218, 185, 65), Parent = leftFrame,
+})
+corner(leftCoinBg, 75); stroke(leftCoinBg, 3, P.Gold)
+
+local leftImg = new("ImageLabel", {
+	Size = UDim2.new(0.9,0,0.9,0), Position = UDim2.new(0.05,0,0.05,0),
+	BackgroundTransparency = 1, ScaleType = Enum.ScaleType.Crop, Parent = leftCoinBg,
+})
+corner(leftImg, 68)
+
+local leftSideLabel = new("TextLabel", {
+	Text = "TUNG TUNG", Size = UDim2.new(1,0,0,24), Position = UDim2.new(0,0,0,160),
+	BackgroundTransparency = 1, TextColor3 = P.GoldBright, Font = Enum.Font.GothamBold, TextSize = 16, Parent = leftFrame,
+})
+local leftName = new("TextLabel", {
+	Text = "P1", Size = UDim2.new(1,0,0,22), Position = UDim2.new(0,0,0,186),
+	BackgroundTransparency = 1, TextColor3 = P.White, Font = Enum.Font.GothamBold, TextSize = 14,
+	TextTruncate = Enum.TextTruncate.AtEnd, Parent = leftFrame,
+})
+
+-- Right portrait — coin-shaped circle with name underneath
+local rightFrame = new("Frame", {
+	Size = UDim2.new(0,180,0,260), Position = UDim2.new(0.82,0,0.14,0), AnchorPoint = Vector2.new(0.5,0.5),
+	BackgroundTransparency = 1, Parent = flipPanel,
+})
+
+local rightCoinBg = new("Frame", {
+	Size = UDim2.new(0,150,0,150), Position = UDim2.new(0.5,0,0,0), AnchorPoint = Vector2.new(0.5,0),
+	BackgroundColor3 = Color3.fromRGB(218, 185, 65), Parent = rightFrame,
+})
+corner(rightCoinBg, 75); stroke(rightCoinBg, 3, P.Gold)
+
+local rightImg = new("ImageLabel", {
+	Size = UDim2.new(0.9,0,0.9,0), Position = UDim2.new(0.05,0,0.05,0),
+	BackgroundTransparency = 1, ScaleType = Enum.ScaleType.Crop, Parent = rightCoinBg,
+})
+corner(rightImg, 68)
+
+local rightSideLabel = new("TextLabel", {
+	Text = "TRALALELO", Size = UDim2.new(1,0,0,24), Position = UDim2.new(0,0,0,160),
+	BackgroundTransparency = 1, TextColor3 = P.GoldBright, Font = Enum.Font.GothamBold, TextSize = 16, Parent = rightFrame,
+})
+local rightName = new("TextLabel", {
+	Text = "P2", Size = UDim2.new(1,0,0,22), Position = UDim2.new(0,0,0,186),
+	BackgroundTransparency = 1, TextColor3 = P.White, Font = Enum.Font.GothamBold, TextSize = 14,
+	TextTruncate = Enum.TextTruncate.AtEnd, Parent = rightFrame,
+})
+
+local flipBetLabel = new("TextLabel", {
+	Text = "BET: $0", Size = UDim2.new(0,300,0,40),
+	Position = UDim2.new(0.5,0,0.33,0), AnchorPoint = Vector2.new(0.5,0),
+	BackgroundTransparency = 1, TextColor3 = P.GoldBright, Font = Enum.Font.GothamBold, TextSize = 28, Parent = flipPanel,
+})
+
+-- ViewportFrame for 3D coin (lowered to avoid clipping at top)
+local vpFrame = new("ViewportFrame", {
+	Size = UDim2.new(0,300,0,300), Position = UDim2.new(0.5,0,0.70,0), AnchorPoint = Vector2.new(0.5,0.5),
+	BackgroundTransparency = 1, Parent = flipPanel,
+})
+local vpCam = Instance.new("Camera")
+vpCam.CFrame = CFrame.new(Vector3.new(0, 5, 7), Vector3.new(0, 0, 0))
+vpCam.Parent = vpFrame
+vpFrame.CurrentCamera = vpCam
+
+-- Coin model in viewport
+local coinPart = Instance.new("Part")
+coinPart.Name       = "Coin"
+coinPart.Shape      = Enum.PartType.Cylinder
+coinPart.Size       = Vector3.new(0.4, 4, 4)
+coinPart.Color      = Color3.fromRGB(218, 185, 65)
+coinPart.Material   = Enum.Material.Metal
+coinPart.Anchored   = true
+coinPart.CanCollide = false
+coinPart.CFrame     = CFrame.new(0,0,0) * CFrame.Angles(0,0,math.rad(90))
+coinPart.Parent     = vpFrame
+
+-- Tung Tung = Right face (+X on sideways cylinder)
+local tungDecal = Instance.new("Decal")
+tungDecal.Face    = Enum.NormalId.Right
+tungDecal.Texture = TUNG_TUNG_ID
+tungDecal.Parent  = coinPart
+
+-- Tralalelo = Left face (-X)
+local tralaDecal = Instance.new("Decal")
+tralaDecal.Face    = Enum.NormalId.Left
+tralaDecal.Texture = TRALALELO_ID
+tralaDecal.Parent  = coinPart
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 6.  RESULT PANEL
+-- ═══════════════════════════════════════════════════════════════════════════
+local resultPanel = new("Frame", {
+	Name = "ResultPanel", Size = UDim2.new(0,480,0,280),
+	Position = UDim2.new(0.5,0,0.5,0), AnchorPoint = Vector2.new(0.5,0.5),
+	BackgroundColor3 = P.Panel, Visible = false, Parent = gui,
+})
+corner(resultPanel, 14); stroke(resultPanel, 3, P.Gold)
+
+local resultTitle = new("TextLabel", {
+	Text = "YOU WIN!", Size = UDim2.new(1,0,0,55), Position = UDim2.new(0,0,0,20),
+	BackgroundTransparency = 1, TextColor3 = P.Green, Font = Enum.Font.GothamBold, TextSize = 42, Parent = resultPanel,
+})
+local resultAmount = new("TextLabel", {
+	Text = "+$0", Size = UDim2.new(1,0,0,45), Position = UDim2.new(0,0,0,80),
+	BackgroundTransparency = 1, TextColor3 = P.GoldBright, Font = Enum.Font.GothamBold, TextSize = 36, Parent = resultPanel,
+})
+local resultImg = new("ImageLabel", {
+	Size = UDim2.new(0,80,0,80), Position = UDim2.new(0.5,0,0,140), AnchorPoint = Vector2.new(0.5,0),
+	BackgroundTransparency = 1, ScaleType = Enum.ScaleType.Fit, Parent = resultPanel,
+})
+local resultSideText = new("TextLabel", {
+	Text = "", Size = UDim2.new(1,0,0,25), Position = UDim2.new(0,0,0,225),
+	BackgroundTransparency = 1, TextColor3 = P.Dim, Font = Enum.Font.GothamMedium, TextSize = 15, Parent = resultPanel,
+})
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- SEATING
+-- ═══════════════════════════════════════════════════════════════════════════
+SeatPlayer.OnClientEvent:Connect(function(tbl, seatName)
+	currentTable   = tbl
+	seatedSeatName = seatName
+
+	local char = player.Character
+	if not char then return end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	local hum = char:FindFirstChild("Humanoid")
+	if not hrp or not hum then return end
+
+	savedCFrame = hrp.CFrame
+
+	local seat = tbl:FindFirstChild(seatName)
+	local surface = tbl:FindFirstChild("TableSurface")
+	if seat and surface then
+		local look = (surface.Position - seat.CFrame.Position).Unit
+		look = Vector3.new(look.X, 0, look.Z).Unit
+		local seatTop = seat.CFrame.Position + Vector3.new(0, 1, 0)
+		hrp.CFrame = CFrame.new(seatTop, seatTop + look)
+	end
+	hum.Sit = true
+end)
+
+UnseatPlayer.OnClientEvent:Connect(function(tbl)
+	if tbl ~= currentTable then return end
+	local char = player.Character
+	if char then
+		local hum = char:FindFirstChild("Humanoid")
+		if hum then hum.Sit = false end
+		local hrp = char:FindFirstChild("HumanoidRootPart")
+		if hrp and savedCFrame then task.wait(0.1); hrp.CFrame = savedCFrame end
+	end
+	currentTable = nil; seatedSeatName = nil; savedCFrame = nil; mySide = nil
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- EVENT HANDLERS
+-- ═══════════════════════════════════════════════════════════════════════════
+
+ShowSidePicker.OnClientEvent:Connect(function(tbl)
+	currentTable = tbl
+	hideAll()
+	sidePanel.Visible = true
+	highlightCard(tungCard, false)
+	highlightCard(tralaCard, false)
+end)
+
+ShowBetUI.OnClientEvent:Connect(function(tbl, minBet, maxBet, side)
+	currentTable = tbl
+	mySide = side
+	hideAll()
+	betPanel.Visible = true
+	betInput.Text = ""
+	betError.Text = ""
+	betSideImg.Image = (side == "tung") and TUNG_TUNG_ID or TRALALELO_ID
+	betHint.Text = "Min: " .. formatCash(minBet) .. "  •  Max: " .. formatCash(maxBet)
+end)
+
+ShowWaitUI.OnClientEvent:Connect(function(tbl, betAmount, houseFee)
+	hideAll()
+	waitPanel.Visible = true
+	waitBetLabel.Text = "Your bet: " .. formatCash(betAmount)
+	local fee = math.floor(betAmount * (houseFee or 0.05))
+	houseFeeLabel.Text = "(5% fee: " .. formatCash(fee) .. ")"
+	startDots()
+end)
+
+ShowConfirmUI.OnClientEvent:Connect(function(tbl, opponentName, betAmount, myAssignedSide)
+	currentTable = tbl
+	mySide = myAssignedSide
+	hideAll()
+	confirmPanel.Visible = true
+	confirmInfo.Text = opponentName .. " has challenged you to a coinflip!"
+	confirmBetDisplay.Text = formatCash(betAmount)
+	confirmSideImg.Image = (myAssignedSide == "tung") and TUNG_TUNG_ID or TRALALELO_ID
+	local sideName = (myAssignedSide == "tung") and "Tung Tung" or "Tralalelo"
+	confirmSideLabel.Text = "Your side: " .. sideName
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- COIN FLIP ANIMATION
+-- ═══════════════════════════════════════════════════════════════════════════
+PlayFlipAnim.OnClientEvent:Connect(function(tbl, landsSide, myPickedSide, p1Name, p2Name, betAmount)
+	hideAll()
+	flipPanel.Visible = true
+
+	-- Setup portraits based on who picked what
+	-- P1 is always on the left
+	leftName.Text = p1Name
+	rightName.Text = p2Name
+
+	-- The landsSide tells us which image landed face-up on the coin
+	-- myPickedSide tells this player which side they chose
+	flipBetLabel.Text = "BET: " .. formatCash(betAmount)
+
+	-- Set portrait images/labels
+	leftImg.Image = TUNG_TUNG_ID
+	leftSideLabel.Text = "TUNG TUNG"
+	rightImg.Image = TRALALELO_ID
+	rightSideLabel.Text = "TRALALELO"
+
+	-- Reset strokes on the coin circles
+	leftCoinBg:FindFirstChildOfClass("UIStroke").Color = P.Gold
+	leftCoinBg:FindFirstChildOfClass("UIStroke").Thickness = 3
+	rightCoinBg:FindFirstChildOfClass("UIStroke").Color = P.Gold
+	rightCoinBg:FindFirstChildOfClass("UIStroke").Thickness = 3
+
+	-- Reset coin to flat position (cylinder axis along X → rotate 90° Z to stand upright)
+	coinPart.CFrame = CFrame.Angles(0, 0, math.rad(90))
+
+	-- Determine total half-flips for result:
+	-- Even = Right face (+X → +Y after orient) stays up = Tung Tung visible
+	-- Odd  = Left face flipped up = Tralalelo visible
+	local totalHalfFlips = (landsSide == "tung") and 14 or 15
+	local ANIM_TIME = 4.0
+	local TOSS_HEIGHT = 4.0    -- peak height of the coin toss
+
+	local startTime = tick()
+	local conn
+	conn = RunService.RenderStepped:Connect(function()
+		local elapsed = tick() - startTime
+		local t = math.clamp(elapsed / ANIM_TIME, 0, 1)
+
+		if elapsed >= ANIM_TIME then
+			conn:Disconnect()
+			-- Final resting position: orient upright FIRST, then apply final flip rotation
+			coinPart.CFrame = CFrame.new(0, 0, 0)
+				* CFrame.Angles(totalHalfFlips * math.pi, 0, 0)
+				* CFrame.Angles(0, 0, math.rad(90))
+			return
+		end
+
+		-- Cubic ease-out for flip deceleration (fast start, slow finish)
+		local eased = 1 - (1 - t)^3
+		local flipAngle = eased * totalHalfFlips * math.pi
+
+		-- Parabolic arc: coin goes up then comes back down
+		local arc = TOSS_HEIGHT * math.sin(t * math.pi)
+
+		-- Small Y wobble for visual interest (fades out)
+		local wobble = math.sin(t * math.pi * 6) * (1 - t) * 0.3
+
+		-- KEY FIX: Orient cylinder upright FIRST, then apply flip rotation around world X
+		-- This makes the coin tumble forward/backward (like a real coin toss)
+		-- instead of spinning around its own axis like a drill
+		coinPart.CFrame = CFrame.new(0, arc, 0)
+			* CFrame.Angles(flipAngle, wobble, 0)
+			* CFrame.Angles(0, 0, math.rad(90))
+	end)
+
+	-- Highlight winner coin circle after animation
+	task.delay(ANIM_TIME + 0.3, function()
+		if landsSide == "tung" then
+			leftCoinBg:FindFirstChildOfClass("UIStroke").Color = P.Green
+			leftCoinBg:FindFirstChildOfClass("UIStroke").Thickness = 5
+		else
+			rightCoinBg:FindFirstChildOfClass("UIStroke").Color = P.Green
+			rightCoinBg:FindFirstChildOfClass("UIStroke").Thickness = 5
+		end
+	end)
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- SHOW RESULT
+-- ═══════════════════════════════════════════════════════════════════════════
+ShowResult.OnClientEvent:Connect(function(tbl, iWon, betAmount)
+	task.wait(0.5)
+	resultPanel.Visible = true
+
+	if iWon then
+		resultTitle.Text        = "YOU WIN!"
+		resultTitle.TextColor3  = P.Green
+		resultAmount.Text       = "+" .. formatCash(betAmount)
+		resultAmount.TextColor3 = P.Green
+		resultImg.Image         = (mySide == "tung") and TUNG_TUNG_ID or TRALALELO_ID
+		resultSideText.Text     = (mySide == "tung") and "Tung Tung Wins!" or "Tralalelo Wins!"
+	else
+		resultTitle.Text        = "YOU LOSE"
+		resultTitle.TextColor3  = P.Red
+		resultAmount.Text       = "-" .. formatCash(betAmount)
+		resultAmount.TextColor3 = P.Red
+		local loserSide = (mySide == "tung") and "trala" or "tung"
+		resultImg.Image         = (loserSide == "tung") and TUNG_TUNG_ID or TRALALELO_ID
+		resultSideText.Text     = (loserSide == "tung") and "Tung Tung Wins!" or "Tralalelo Wins!"
+	end
+
+	-- Pop-in animation
+	resultPanel.Size = UDim2.new(0,10,0,10)
+	TweenService:Create(resultPanel, TweenInfo.new(0.4, Enum.EasingStyle.Back), {
+		Size = UDim2.new(0,480,0,280),
+	}):Play()
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- HIDE ALL
+-- ═══════════════════════════════════════════════════════════════════════════
+HideAllUI.OnClientEvent:Connect(function()
+	hideAll()
+	pcall(function()
+		leftFrame:FindFirstChildOfClass("UIStroke").Thickness = 3
+		rightFrame:FindFirstChildOfClass("UIStroke").Thickness = 3
+	end)
+end)
+
+print("[CoinflipClient] ✅ Ready")
