@@ -1,0 +1,1032 @@
+--[[
+	BrainrotClient.lua
+	Brainrot Collection Feature - Client UI System
+	Placed in StarterPlayer > StarterPlayerScripts
+
+	UPDATED: Roblox-style numbered hotbar slots (1-9 keys), holdable brainrots,
+	         walk-over collection (no more ProximityPrompt)
+]]
+
+local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+
+-- Color Palette
+local Colors = {
+	BG = Color3.fromRGB(12, 8, 20),
+	Panel = Color3.fromRGB(22, 18, 35),
+	Card = Color3.fromRGB(30, 26, 45),
+	Gold = Color3.fromRGB(212, 175, 55),
+	GoldBright = Color3.fromRGB(255, 215, 0),
+	White = Color3.fromRGB(240, 240, 255),
+	Dim = Color3.fromRGB(140, 140, 165),
+	Green = Color3.fromRGB(40, 200, 80),
+	Red = Color3.fromRGB(200, 40, 40),
+	Blue = Color3.fromRGB(50, 130, 255),
+	SlotBG = Color3.fromRGB(40, 35, 55),
+	SlotSelected = Color3.fromRGB(70, 60, 100),
+}
+
+-- Rarity Colors
+local RarityColors = {
+	Common = Color3.fromRGB(180, 180, 180),
+	Uncommon = Color3.fromRGB(80, 200, 80),
+	Rare = Color3.fromRGB(60, 130, 255),
+	Epic = Color3.fromRGB(180, 60, 255),
+	Legendary = Color3.fromRGB(255, 180, 0),
+	Mythic = Color3.fromRGB(255, 50, 50),
+}
+
+-- Get or create screen GUI
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "BrainrotUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = player:WaitForChild("PlayerGui")
+
+-- State Management
+local State = {
+	inventory = {},
+	maxSlots = 0,
+	pendingIncome = 0,
+	incomePerMin = 0,
+	shopData = {},
+	selectedSlot = 0,         -- 0 = nothing selected, 1-9 = slot number
+	equippedBrainrotId = "",  -- id of currently equipped brainrot
+}
+
+-- Get Remote Events
+local BrainrotEvents = ReplicatedStorage:WaitForChild("BrainrotEvents")
+local SyncInventory      = BrainrotEvents:WaitForChild("SyncInventory")
+local SyncPendingIncome  = BrainrotEvents:WaitForChild("SyncPendingIncome")
+local ShowPickupToast    = BrainrotEvents:WaitForChild("ShowPickupToast")
+local OpenShopUI         = BrainrotEvents:WaitForChild("OpenShopUI")
+local OpenInventoryUI    = BrainrotEvents:WaitForChild("OpenInventoryUI")
+local SyncShopData       = BrainrotEvents:WaitForChild("SyncShopData")
+local BuyBrainrot        = BrainrotEvents:WaitForChild("BuyBrainrot")
+local AssignPedestal     = BrainrotEvents:WaitForChild("AssignPedestal")
+local CollectIncome      = BrainrotEvents:WaitForChild("CollectIncome")
+local RequestInventory   = BrainrotEvents:WaitForChild("RequestInventory")
+local RequestShopData    = BrainrotEvents:WaitForChild("RequestShopData")
+local RequestPendingIncome = BrainrotEvents:WaitForChild("RequestPendingIncome")
+local EquipBrainrot      = BrainrotEvents:WaitForChild("EquipBrainrot")
+
+-- ============================================================================
+-- HELPER FUNCTIONS
+-- ============================================================================
+
+local function CreateLabel(parent, text, size, color, font)
+	local label = Instance.new("TextLabel")
+	label.Text = text
+	label.TextSize = size
+	label.TextColor3 = color
+	label.Font = font or Enum.Font.GothamBold
+	label.BackgroundTransparency = 1
+	label.Parent = parent
+	return label
+end
+
+local function CreateButton(parent, text, size, bgColor, textColor, callback)
+	local button = Instance.new("TextButton")
+	button.Text = text
+	button.TextSize = size
+	button.TextColor3 = textColor
+	button.Font = Enum.Font.GothamBold
+	button.BackgroundColor3 = bgColor
+	button.BorderSizePixel = 0
+	button.Parent = parent
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 6)
+	corner.Parent = button
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(100, 100, 100)
+	stroke.Thickness = 1
+	stroke.Parent = button
+
+	if callback then
+		button.MouseButton1Click:Connect(callback)
+	end
+
+	return button
+end
+
+local function CreatePanel(parent, name)
+	local panel = Instance.new("Frame")
+	panel.Name = name
+	panel.BackgroundColor3 = Colors.Panel
+	panel.BorderSizePixel = 0
+	panel.Parent = parent
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = panel
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Colors.Gold
+	stroke.Thickness = 2
+	stroke.Parent = panel
+
+	return panel
+end
+
+local function CreateScrollFrame(parent, name)
+	local scrollFrame = Instance.new("ScrollingFrame")
+	scrollFrame.Name = name
+	scrollFrame.BackgroundColor3 = Colors.Card
+	scrollFrame.BorderSizePixel = 0
+	scrollFrame.ScrollBarThickness = 8
+	scrollFrame.ScrollBarImageColor3 = Colors.Gold
+	scrollFrame.Parent = parent
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 6)
+	corner.Parent = scrollFrame
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(60, 60, 100)
+	stroke.Thickness = 1
+	stroke.Parent = scrollFrame
+
+	return scrollFrame
+end
+
+local function GetRarityColor(rarity)
+	return RarityColors[rarity] or Colors.Dim
+end
+
+local function FormatMoney(amount)
+	if amount >= 1000000 then
+		return string.format("$%.1fM", amount / 1000000)
+	elseif amount >= 1000 then
+		return string.format("$%.1fK", amount / 1000)
+	else
+		return "$" .. tostring(math.floor(amount))
+	end
+end
+
+local function TweenElement(element, properties, duration)
+	local tweenInfo = TweenInfo.new(
+		duration or 0.3,
+		Enum.EasingStyle.Quad,
+		Enum.EasingDirection.InOut
+	)
+	local tween = TweenService:Create(element, tweenInfo, properties)
+	tween:Play()
+	return tween
+end
+
+-- ============================================================================
+-- HOTBAR (Roblox-style numbered slots 1-9)
+-- ============================================================================
+
+local HOTBAR_SLOT_SIZE = 65
+local HOTBAR_SLOT_PADDING = 5
+local MAX_HOTBAR_SLOTS = 9
+
+local HotbarFrame = Instance.new("Frame")
+HotbarFrame.Name = "Hotbar"
+HotbarFrame.BackgroundTransparency = 1
+HotbarFrame.BorderSizePixel = 0
+HotbarFrame.ZIndex = 5
+HotbarFrame.Parent = ScreenGui
+
+-- We'll dynamically size the hotbar based on inventory count
+local hotbarSlots = {}  -- array of Frame references
+
+local function getHotbarWidth(count)
+	local slotCount = math.min(count, MAX_HOTBAR_SLOTS)
+	if slotCount < 1 then slotCount = 1 end
+	return (HOTBAR_SLOT_SIZE * slotCount) + (HOTBAR_SLOT_PADDING * (slotCount - 1))
+end
+
+local function updateHotbarPosition(hotbarInv)
+	local count = math.max(1, math.min(#hotbarInv, MAX_HOTBAR_SLOTS))
+	local totalWidth = getHotbarWidth(count)
+	HotbarFrame.Size = UDim2.new(0, totalWidth, 0, HOTBAR_SLOT_SIZE + 20)
+	HotbarFrame.Position = UDim2.new(0.5, -totalWidth / 2, 1, -(HOTBAR_SLOT_SIZE + 30))
+end
+
+-- ============================================================================
+-- HOTBAR FILTERED INVENTORY (only brainrots NOT on pedestals)
+-- ============================================================================
+
+local function getHotbarInventory()
+	local filtered = {}
+	for _, brainrot in ipairs(State.inventory) do
+		if not brainrot.pedestalSlot or brainrot.pedestalSlot == 0 then
+			table.insert(filtered, brainrot)
+		end
+	end
+	return filtered
+end
+
+-- ============================================================================
+-- EQUIP / UNEQUIP LOGIC
+-- ============================================================================
+
+local function equipSlot(slotNumber)
+	local hotbarInv = getHotbarInventory()
+	if slotNumber == State.selectedSlot then
+		-- Deselect (unequip)
+		State.selectedSlot = 0
+		State.equippedBrainrotId = ""
+		EquipBrainrot:FireServer("")
+	else
+		local brainrot = hotbarInv[slotNumber]
+		if brainrot then
+			State.selectedSlot = slotNumber
+			State.equippedBrainrotId = brainrot.id
+			EquipBrainrot:FireServer(brainrot.id)
+		end
+	end
+end
+
+-- ============================================================================
+-- HOTBAR REFRESH
+-- ============================================================================
+
+local function RefreshHotbar()
+	-- Clear existing slots
+	for _, child in ipairs(HotbarFrame:GetChildren()) do
+		if child:IsA("Frame") or child:IsA("TextButton") or child:IsA("TextLabel") then
+			child:Destroy()
+		end
+	end
+	hotbarSlots = {}
+
+	-- Only show brainrots NOT placed on pedestals
+	local hotbarInv = getHotbarInventory()
+
+	updateHotbarPosition(hotbarInv)
+
+	local displayCount = math.min(#hotbarInv, MAX_HOTBAR_SLOTS)
+	if displayCount < 1 then
+		-- Show at least one empty slot
+		displayCount = 1
+	end
+
+	for i = 1, displayCount do
+		local brainrot = hotbarInv[i]
+		local isSelected = (i == State.selectedSlot)
+
+		local slot = Instance.new("TextButton")
+		slot.Name = "HotbarSlot_" .. i
+		slot.Size = UDim2.new(0, HOTBAR_SLOT_SIZE, 0, HOTBAR_SLOT_SIZE)
+		slot.Position = UDim2.new(0, (i - 1) * (HOTBAR_SLOT_SIZE + HOTBAR_SLOT_PADDING), 0, 16)
+		slot.BackgroundColor3 = isSelected and Colors.SlotSelected or Colors.SlotBG
+		slot.BackgroundTransparency = isSelected and 0 or 0.15
+		slot.BorderSizePixel = 0
+		slot.Text = ""
+		slot.AutoButtonColor = false
+		slot.ZIndex = 6
+		slot.Parent = HotbarFrame
+
+		local slotCorner = Instance.new("UICorner")
+		slotCorner.CornerRadius = UDim.new(0, 8)
+		slotCorner.Parent = slot
+
+		-- Border — rarity color if filled, dim gray if empty
+		local slotStroke = Instance.new("UIStroke")
+		if brainrot then
+			slotStroke.Color = isSelected and Colors.GoldBright or GetRarityColor(brainrot.rarity)
+			slotStroke.Thickness = isSelected and 3 or 2
+		else
+			slotStroke.Color = Color3.fromRGB(60, 55, 75)
+			slotStroke.Thickness = 1
+		end
+		slotStroke.Parent = slot
+
+		-- Number label (top-left)
+		local numLabel = Instance.new("TextLabel")
+		numLabel.Name = "Number"
+		numLabel.Size = UDim2.new(0, 16, 0, 16)
+		numLabel.Position = UDim2.new(0, 3, 0, 2)
+		numLabel.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+		numLabel.BackgroundTransparency = 0.4
+		numLabel.Text = tostring(i)
+		numLabel.TextSize = 11
+		numLabel.TextColor3 = isSelected and Colors.GoldBright or Colors.Dim
+		numLabel.Font = Enum.Font.GothamBold
+		numLabel.ZIndex = 8
+		numLabel.Parent = slot
+
+		local numCorner = Instance.new("UICorner")
+		numCorner.CornerRadius = UDim.new(0, 4)
+		numCorner.Parent = numLabel
+
+		if brainrot then
+			-- Brainrot image
+			local img = Instance.new("ImageLabel")
+			img.Name = "Icon"
+			img.Size = UDim2.new(0, 42, 0, 42)
+			img.Position = UDim2.new(0.5, -21, 0.5, -24)
+			img.BackgroundTransparency = 1
+			img.Image = tostring(brainrot.imageId or "")
+			img.ZIndex = 7
+			img.Parent = slot
+
+			-- Short name at bottom
+			local nameLabel = Instance.new("TextLabel")
+			nameLabel.Name = "BrainrotName"
+			nameLabel.Size = UDim2.new(1, -4, 0, 12)
+			nameLabel.Position = UDim2.new(0, 2, 1, -14)
+			nameLabel.BackgroundTransparency = 1
+			nameLabel.Text = string.sub(brainrot.name, 1, 10)
+			nameLabel.TextSize = 8
+			nameLabel.TextColor3 = Colors.Dim
+			nameLabel.Font = Enum.Font.GothamMedium
+			nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+			nameLabel.ZIndex = 8
+			nameLabel.Parent = slot
+
+			-- Pedestal indicator (green dot if assigned)
+			if brainrot.pedestalSlot and brainrot.pedestalSlot > 0 then
+				local dot = Instance.new("Frame")
+				dot.Name = "PedestalDot"
+				dot.Size = UDim2.new(0, 10, 0, 10)
+				dot.Position = UDim2.new(1, -13, 0, 3)
+				dot.BackgroundColor3 = Colors.Green
+				dot.ZIndex = 9
+				dot.Parent = slot
+
+				local dotCorner = Instance.new("UICorner")
+				dotCorner.CornerRadius = UDim.new(1, 0)
+				dotCorner.Parent = dot
+			end
+
+			-- Income text (small green text)
+			local incomeLabel = Instance.new("TextLabel")
+			incomeLabel.Name = "Income"
+			incomeLabel.Size = UDim2.new(1, 0, 0, 10)
+			incomeLabel.Position = UDim2.new(0, 0, 0.5, 14)
+			incomeLabel.BackgroundTransparency = 1
+			incomeLabel.Text = FormatMoney(brainrot.incomePerMin) .. "/m"
+			incomeLabel.TextSize = 7
+			incomeLabel.TextColor3 = Colors.Green
+			incomeLabel.Font = Enum.Font.GothamMedium
+			incomeLabel.ZIndex = 8
+			incomeLabel.Parent = slot
+		end
+
+		-- Click handler
+		local slotIndex = i
+		slot.MouseButton1Click:Connect(function()
+			local currentHotbar = getHotbarInventory()
+			if currentHotbar[slotIndex] then
+				equipSlot(slotIndex)
+				RefreshHotbar()
+			end
+		end)
+
+		hotbarSlots[i] = slot
+	end
+
+	-- Income indicator above hotbar
+	local incomeText = Instance.new("TextLabel")
+	incomeText.Name = "IncomeIndicator"
+	incomeText.Size = UDim2.new(1, 0, 0, 14)
+	incomeText.Position = UDim2.new(0, 0, 0, 0)
+	incomeText.BackgroundTransparency = 1
+	incomeText.Text = FormatMoney(State.incomePerMin) .. "/min income"
+	incomeText.TextSize = 10
+	incomeText.TextColor3 = Colors.Green
+	incomeText.Font = Enum.Font.GothamBold
+	incomeText.ZIndex = 6
+	incomeText.Parent = HotbarFrame
+
+	-- "More..." label if unplaced inventory > 9
+	if #hotbarInv > MAX_HOTBAR_SLOTS then
+		local moreLabel = Instance.new("TextLabel")
+		moreLabel.Name = "MoreLabel"
+		moreLabel.Size = UDim2.new(1, 0, 0, 12)
+		moreLabel.Position = UDim2.new(0, 0, 1, -2)
+		moreLabel.BackgroundTransparency = 1
+		moreLabel.Text = "+" .. (#hotbarInv - MAX_HOTBAR_SLOTS) .. " more (press I)"
+		moreLabel.TextSize = 9
+		moreLabel.TextColor3 = Colors.Dim
+		moreLabel.Font = Enum.Font.GothamMedium
+		moreLabel.ZIndex = 6
+		moreLabel.Parent = HotbarFrame
+	end
+end
+
+-- ============================================================================
+-- KEYBOARD INPUT (1-9 to select slots, I to open inventory)
+-- ============================================================================
+
+local NUMBER_KEYS = {
+	[Enum.KeyCode.One]   = 1,
+	[Enum.KeyCode.Two]   = 2,
+	[Enum.KeyCode.Three] = 3,
+	[Enum.KeyCode.Four]  = 4,
+	[Enum.KeyCode.Five]  = 5,
+	[Enum.KeyCode.Six]   = 6,
+	[Enum.KeyCode.Seven] = 7,
+	[Enum.KeyCode.Eight] = 8,
+	[Enum.KeyCode.Nine]  = 9,
+}
+
+-- Forward declare panels so keyboard handler can reference them
+local InventoryPanel
+local ShopPanel
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+
+	local keyCode = input.KeyCode
+	local slotNum = NUMBER_KEYS[keyCode]
+
+	if slotNum then
+		local hotbarInv = getHotbarInventory()
+		if slotNum <= #hotbarInv then
+			equipSlot(slotNum)
+			RefreshHotbar()
+		end
+	elseif keyCode == Enum.KeyCode.I then
+		-- Toggle inventory panel
+		if InventoryPanel and InventoryPanel.Visible then
+			TweenElement(InventoryPanel, {Position = UDim2.new(0.5, -275, 0.5, -500)}, 0.3)
+			task.delay(0.3, function()
+				InventoryPanel.Visible = false
+			end)
+		elseif InventoryPanel then
+			InventoryPanel.Visible = true
+			TweenElement(InventoryPanel, {Position = UDim2.new(0.5, -275, 0.5, -250)}, 0.3)
+			RequestInventory:FireServer()
+		end
+	end
+end)
+
+-- ============================================================================
+-- INVENTORY PANEL
+-- ============================================================================
+
+InventoryPanel = CreatePanel(ScreenGui, "InventoryPanel")
+InventoryPanel.Size = UDim2.new(0, 550, 0, 500)
+InventoryPanel.Position = UDim2.new(0.5, -275, 0.5, -250)
+InventoryPanel.Visible = false
+InventoryPanel.ZIndex = 10
+
+local InventoryPadding = Instance.new("UIPadding")
+InventoryPadding.PaddingTop = UDim.new(0, 15)
+InventoryPadding.PaddingBottom = UDim.new(0, 15)
+InventoryPadding.PaddingLeft = UDim.new(0, 15)
+InventoryPadding.PaddingRight = UDim.new(0, 15)
+InventoryPadding.Parent = InventoryPanel
+
+-- Header
+local InventoryHeader = Instance.new("Frame")
+InventoryHeader.Name = "Header"
+InventoryHeader.BackgroundTransparency = 1
+InventoryHeader.Size = UDim2.new(1, 0, 0, 35)
+InventoryHeader.Parent = InventoryPanel
+
+local InventoryTitle = CreateLabel(InventoryHeader, "BRAINROT COLLECTION", 18, Colors.Gold, Enum.Font.GothamBold)
+InventoryTitle.Size = UDim2.new(0.7, 0, 1, 0)
+InventoryTitle.TextXAlignment = Enum.TextXAlignment.Left
+
+local InventoryCloseButton = CreateButton(InventoryHeader, "X", 16, Colors.Red, Colors.White, function()
+	TweenElement(InventoryPanel, {Position = UDim2.new(0.5, -275, 0.5, -500)}, 0.3)
+	task.delay(0.3, function()
+		InventoryPanel.Visible = false
+	end)
+end)
+InventoryCloseButton.Size = UDim2.new(0, 30, 0, 30)
+InventoryCloseButton.Position = UDim2.new(1, -35, 0.5, -15)
+InventoryCloseButton.ZIndex = 11
+
+-- Stats Bar
+local StatsBar = CreatePanel(InventoryPanel, "StatsBar")
+StatsBar.BackgroundColor3 = Colors.Card
+StatsBar.Size = UDim2.new(1, -30, 0, 50)
+StatsBar.Position = UDim2.new(0, 15, 0, 50)
+StatsBar.ZIndex = 9
+
+local StatsPadding = Instance.new("UIPadding")
+StatsPadding.PaddingTop = UDim.new(0, 8)
+StatsPadding.PaddingBottom = UDim.new(0, 8)
+StatsPadding.PaddingLeft = UDim.new(0, 12)
+StatsPadding.PaddingRight = UDim.new(0, 12)
+StatsPadding.Parent = StatsBar
+
+local StatsLayout = Instance.new("UIGridLayout")
+StatsLayout.FillDirection = Enum.FillDirection.Horizontal
+StatsLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+StatsLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+StatsLayout.CellSize = UDim2.new(0.3, 0, 1, 0)
+StatsLayout.CellPadding = UDim2.new(0.02, 0, 0, 0)
+StatsLayout.Parent = StatsBar
+
+local StatTotalOwned = CreateLabel(StatsBar, "Owned: 0", 13, Colors.White, Enum.Font.GothamBold)
+StatTotalOwned.Name = "OwnedStat"
+
+local StatIncomePerMin = CreateLabel(StatsBar, "Income: $0/min", 13, Colors.Green, Enum.Font.GothamBold)
+StatIncomePerMin.Name = "IncomeStat"
+
+local StatPedestalSlots = CreateLabel(StatsBar, "Pedestals: 0/0", 13, Colors.Blue, Enum.Font.GothamBold)
+StatPedestalSlots.Name = "PedestalStat"
+
+-- Scrolling Grid
+local InventoryScrollFrame = CreateScrollFrame(InventoryPanel, "ScrollFrame")
+InventoryScrollFrame.Size = UDim2.new(1, -30, 1, -130)
+InventoryScrollFrame.Position = UDim2.new(0, 15, 0, 110)
+InventoryScrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+InventoryScrollFrame.ZIndex = 9
+
+local GridLayout = Instance.new("UIGridLayout")
+GridLayout.CellPadding = UDim2.new(0, 10, 0, 10)
+GridLayout.CellSize = UDim2.new(0, 160, 0, 180)
+GridLayout.SortOrder = Enum.SortOrder.LayoutOrder
+GridLayout.Parent = InventoryScrollFrame
+
+-- ============================================================================
+-- SHOP PANEL
+-- ============================================================================
+
+ShopPanel = CreatePanel(ScreenGui, "ShopPanel")
+ShopPanel.Size = UDim2.new(0, 500, 0, 550)
+ShopPanel.Position = UDim2.new(0.5, -250, 0.5, -275)
+ShopPanel.Visible = false
+ShopPanel.ZIndex = 10
+
+local ShopPadding = Instance.new("UIPadding")
+ShopPadding.PaddingTop = UDim.new(0, 15)
+ShopPadding.PaddingBottom = UDim.new(0, 15)
+ShopPadding.PaddingLeft = UDim.new(0, 15)
+ShopPadding.PaddingRight = UDim.new(0, 15)
+ShopPadding.Parent = ShopPanel
+
+-- Shop Header
+local ShopHeader = Instance.new("Frame")
+ShopHeader.Name = "Header"
+ShopHeader.BackgroundTransparency = 1
+ShopHeader.Size = UDim2.new(1, 0, 0, 35)
+ShopHeader.Parent = ShopPanel
+
+local ShopTitle = CreateLabel(ShopHeader, "BRAINROT DEALER", 18, Colors.Gold, Enum.Font.GothamBold)
+ShopTitle.Size = UDim2.new(0.7, 0, 1, 0)
+ShopTitle.TextXAlignment = Enum.TextXAlignment.Left
+
+local ShopCloseButton = CreateButton(ShopHeader, "X", 16, Colors.Red, Colors.White, function()
+	TweenElement(ShopPanel, {Position = UDim2.new(0.5, -250, 0.5, -700)}, 0.3)
+	task.delay(0.3, function()
+		ShopPanel.Visible = false
+	end)
+end)
+ShopCloseButton.Size = UDim2.new(0, 30, 0, 30)
+ShopCloseButton.Position = UDim2.new(1, -35, 0.5, -15)
+ShopCloseButton.ZIndex = 11
+
+-- Shop Scrolling List
+local ShopScrollFrame = CreateScrollFrame(ShopPanel, "ScrollFrame")
+ShopScrollFrame.Size = UDim2.new(1, -30, 1, -65)
+ShopScrollFrame.Position = UDim2.new(0, 15, 0, 50)
+ShopScrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+ShopScrollFrame.ZIndex = 9
+
+local ShopLayout = Instance.new("UIListLayout")
+ShopLayout.Padding = UDim.new(0, 10)
+ShopLayout.FillDirection = Enum.FillDirection.Vertical
+ShopLayout.SortOrder = Enum.SortOrder.LayoutOrder
+ShopLayout.Parent = ShopScrollFrame
+
+-- ============================================================================
+-- COLLECT INCOME (now done via walk-over tiles in casino, no UI overlay needed)
+-- The old overlay is removed. Income collection happens physically in the casino.
+-- ============================================================================
+
+-- ============================================================================
+-- PICKUP TOAST
+-- ============================================================================
+
+local function ShowPickupToastUI(brainrotName, rarity, price)
+	local toast = CreatePanel(ScreenGui, "PickupToast")
+	toast.Size = UDim2.new(0, 300, 0, 95)
+	toast.Position = UDim2.new(0.5, -150, 0, -110)
+	toast.ZIndex = 20
+
+	local toastPadding = Instance.new("UIPadding")
+	toastPadding.PaddingTop = UDim.new(0, 10)
+	toastPadding.PaddingBottom = UDim.new(0, 10)
+	toastPadding.PaddingLeft = UDim.new(0, 10)
+	toastPadding.PaddingRight = UDim.new(0, 10)
+	toastPadding.Parent = toast
+
+	local toastLayout = Instance.new("UIListLayout")
+	toastLayout.Padding = UDim.new(0, 4)
+	toastLayout.FillDirection = Enum.FillDirection.Vertical
+	toastLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	toastLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	toastLayout.Parent = toast
+
+	-- Check if "can't afford" signal
+	if price == -1 then
+		local failLabel = CreateLabel(toast, "NOT ENOUGH CASH!", 16, Colors.Red, Enum.Font.GothamBold)
+		failLabel.Size = UDim2.new(1, 0, 0, 20)
+
+		local nameLabel = CreateLabel(toast, brainrotName, 14, Colors.White, Enum.Font.GothamBold)
+		nameLabel.Size = UDim2.new(1, 0, 0, 18)
+
+		local rarityLabel = CreateLabel(toast, "★ " .. rarity .. " ★", 12, GetRarityColor(rarity), Enum.Font.GothamBold)
+		rarityLabel.Size = UDim2.new(1, 0, 0, 16)
+	elseif rarity == "collect" then
+		-- Income collected from a casino tile
+		local collectLabel = CreateLabel(toast, "COLLECTED!", 16, Colors.Green, Enum.Font.GothamBold)
+		collectLabel.Size = UDim2.new(1, 0, 0, 20)
+
+		local nameLabel = CreateLabel(toast, brainrotName, 14, Colors.White, Enum.Font.GothamBold)
+		nameLabel.Size = UDim2.new(1, 0, 0, 18)
+
+		if price and price > 0 then
+			local amountLabel = CreateLabel(toast, "+" .. FormatMoney(price), 14, Colors.Green, Enum.Font.GothamBold)
+			amountLabel.Size = UDim2.new(1, 0, 0, 18)
+		end
+	else
+		local collectedLabel = CreateLabel(toast, "PURCHASED!", 16, Colors.GoldBright, Enum.Font.GothamBold)
+		collectedLabel.Size = UDim2.new(1, 0, 0, 20)
+
+		local nameLabel = CreateLabel(toast, brainrotName, 14, Colors.White, Enum.Font.GothamBold)
+		nameLabel.Size = UDim2.new(1, 0, 0, 18)
+
+		local rarityLabel = CreateLabel(toast, "★ " .. rarity .. " ★", 12, GetRarityColor(rarity), Enum.Font.GothamBold)
+		rarityLabel.Size = UDim2.new(1, 0, 0, 16)
+
+		if price and price > 0 then
+			local priceLabel = CreateLabel(toast, "-" .. FormatMoney(price), 12, Colors.Red, Enum.Font.GothamBold)
+			priceLabel.Size = UDim2.new(1, 0, 0, 16)
+		end
+	end
+
+	-- Slide in
+	TweenElement(toast, {Position = UDim2.new(0.5, -150, 0, 20)}, 0.4)
+
+	-- Wait and slide out
+	task.delay(2.5, function()
+		TweenElement(toast, {Position = UDim2.new(0.5, -150, 0, -110)}, 0.4)
+		task.delay(0.5, function()
+			if toast.Parent then toast:Destroy() end
+		end)
+	end)
+end
+
+-- ============================================================================
+-- INVENTORY CARD CREATION
+-- ============================================================================
+
+local function CreateInventoryCard(brainrot, layoutOrder)
+	local card = CreatePanel(InventoryScrollFrame, "BrainrotCard_" .. brainrot.index)
+	card.Size = UDim2.new(0, 160, 0, 180)
+	card.LayoutOrder = layoutOrder or 0
+
+	local cardPadding = Instance.new("UIPadding")
+	cardPadding.PaddingTop = UDim.new(0, 8)
+	cardPadding.PaddingBottom = UDim.new(0, 8)
+	cardPadding.PaddingLeft = UDim.new(0, 8)
+	cardPadding.PaddingRight = UDim.new(0, 8)
+	cardPadding.Parent = card
+
+	local cardLayout = Instance.new("UIListLayout")
+	cardLayout.Padding = UDim.new(0, 4)
+	cardLayout.FillDirection = Enum.FillDirection.Vertical
+	cardLayout.VerticalAlignment = Enum.VerticalAlignment.Top
+	cardLayout.Parent = card
+
+	-- Image
+	local imageLabel = Instance.new("ImageLabel")
+	imageLabel.Name = "Image"
+	imageLabel.Size = UDim2.new(0, 50, 0, 50)
+	imageLabel.BorderSizePixel = 0
+	imageLabel.BackgroundColor3 = Colors.BG
+	imageLabel.Image = tostring(brainrot.imageId or "")
+	imageLabel.Parent = card
+
+	local imageCorner = Instance.new("UICorner")
+	imageCorner.CornerRadius = UDim.new(0, 4)
+	imageCorner.Parent = imageLabel
+
+	-- Name
+	local nameLabel = CreateLabel(card, brainrot.name, 11, Colors.White, Enum.Font.GothamBold)
+	nameLabel.Name = "Name"
+	nameLabel.Size = UDim2.new(1, 0, 0, 22)
+	nameLabel.TextWrapped = true
+	nameLabel.TextYAlignment = Enum.TextYAlignment.Top
+
+	-- Rarity
+	local rarityLabel = CreateLabel(card, "★ " .. brainrot.rarity .. " ★", 9, GetRarityColor(brainrot.rarity), Enum.Font.GothamBold)
+	rarityLabel.Name = "Rarity"
+	rarityLabel.Size = UDim2.new(1, 0, 0, 15)
+
+	-- Income per min
+	local incomeLabel = CreateLabel(card, FormatMoney(brainrot.incomePerMin) .. "/min", 10, Colors.Green, Enum.Font.GothamBold)
+	incomeLabel.Name = "Income"
+	incomeLabel.Size = UDim2.new(1, 0, 0, 14)
+
+	-- Status/Buttons Container
+	local buttonContainer = Instance.new("Frame")
+	buttonContainer.Name = "ButtonContainer"
+	buttonContainer.BackgroundTransparency = 1
+	buttonContainer.Size = UDim2.new(1, 0, 0, 30)
+	buttonContainer.Parent = card
+
+	local buttonLayout = Instance.new("UIListLayout")
+	buttonLayout.FillDirection = Enum.FillDirection.Vertical
+	buttonLayout.Padding = UDim.new(0, 2)
+	buttonLayout.Parent = buttonContainer
+
+	if brainrot.pedestalSlot and brainrot.pedestalSlot > 0 then
+		local slotBadge = CreateLabel(buttonContainer, "Pedestal " .. brainrot.pedestalSlot, 10, Colors.Gold, Enum.Font.GothamBold)
+		slotBadge.Name = "SlotBadge"
+		slotBadge.Size = UDim2.new(1, 0, 0, 14)
+		slotBadge.BackgroundColor3 = Color3.fromRGB(80, 70, 40)
+		slotBadge.BackgroundTransparency = 0.3
+
+		local badgeCorner = Instance.new("UICorner")
+		badgeCorner.CornerRadius = UDim.new(0, 3)
+		badgeCorner.Parent = slotBadge
+
+		local removeButton = CreateButton(buttonContainer, "REMOVE", 9, Colors.Red, Colors.White, function()
+			AssignPedestal:FireServer(brainrot.id, 0)
+		end)
+		removeButton.Name = "RemoveButton"
+		removeButton.Size = UDim2.new(1, 0, 0, 14)
+	else
+		local assignButton = CreateButton(buttonContainer, "ASSIGN TO PEDESTAL", 9, Colors.Blue, Colors.White, function()
+			local availableSlot = nil
+			for s = 1, State.maxSlots do
+				local slotOccupied = false
+				for _, brainrotItem in ipairs(State.inventory) do
+					if brainrotItem.pedestalSlot == s then
+						slotOccupied = true
+						break
+					end
+				end
+				if not slotOccupied then
+					availableSlot = s
+					break
+				end
+			end
+
+			if availableSlot then
+				AssignPedestal:FireServer(brainrot.id, availableSlot)
+			end
+		end)
+		assignButton.Name = "AssignButton"
+		assignButton.Size = UDim2.new(1, 0, 0, 14)
+
+		if State.maxSlots <= 0 then
+			assignButton.BackgroundColor3 = Colors.Dim
+			assignButton.Text = "NO CASINO"
+			assignButton.Active = false
+		end
+	end
+
+	return card
+end
+
+-- ============================================================================
+-- SHOP CARD CREATION
+-- ============================================================================
+
+local function CreateShopCard(brainrot, layoutOrder)
+	local card = CreatePanel(ShopScrollFrame, "ShopCard_" .. brainrot.id)
+	card.Size = UDim2.new(1, -10, 0, 90)
+	card.LayoutOrder = layoutOrder or 0
+
+	local cardPadding = Instance.new("UIPadding")
+	cardPadding.PaddingTop = UDim.new(0, 10)
+	cardPadding.PaddingBottom = UDim.new(0, 10)
+	cardPadding.PaddingLeft = UDim.new(0, 10)
+	cardPadding.PaddingRight = UDim.new(0, 10)
+	cardPadding.Parent = card
+
+	local cardLayout = Instance.new("UIListLayout")
+	cardLayout.FillDirection = Enum.FillDirection.Horizontal
+	cardLayout.Padding = UDim.new(0, 10)
+	cardLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	cardLayout.Parent = card
+
+	-- Image
+	local imageLabel = Instance.new("ImageLabel")
+	imageLabel.Name = "Image"
+	imageLabel.Size = UDim2.new(0, 60, 0, 60)
+	imageLabel.BorderSizePixel = 0
+	imageLabel.BackgroundColor3 = Colors.BG
+	imageLabel.Image = tostring(brainrot.imageId or "")
+	imageLabel.Parent = card
+
+	local imageCorner = Instance.new("UICorner")
+	imageCorner.CornerRadius = UDim.new(0, 4)
+	imageCorner.Parent = imageLabel
+
+	-- Info Container
+	local infoContainer = Instance.new("Frame")
+	infoContainer.Name = "InfoContainer"
+	infoContainer.BackgroundTransparency = 1
+	infoContainer.Size = UDim2.new(0, 140, 0, 60)
+	infoContainer.Parent = card
+
+	local infoLayout = Instance.new("UIListLayout")
+	infoLayout.Padding = UDim.new(0, 3)
+	infoLayout.FillDirection = Enum.FillDirection.Vertical
+	infoLayout.VerticalAlignment = Enum.VerticalAlignment.Top
+	infoLayout.Parent = infoContainer
+
+	local nameLabel = CreateLabel(infoContainer, brainrot.name, 12, Colors.White, Enum.Font.GothamBold)
+	nameLabel.Size = UDim2.new(1, 0, 0, 16)
+	nameLabel.TextWrapped = true
+
+	local rarityLabel = CreateLabel(infoContainer, brainrot.rarity, 10, GetRarityColor(brainrot.rarity), Enum.Font.GothamBold)
+	rarityLabel.Size = UDim2.new(1, 0, 0, 14)
+
+	local incomeLabel = CreateLabel(infoContainer, FormatMoney(brainrot.incomePerMin) .. "/min", 10, Colors.Green, Enum.Font.GothamBold)
+	incomeLabel.Size = UDim2.new(1, 0, 0, 14)
+
+	-- Price and Button Container
+	local actionContainer = Instance.new("Frame")
+	actionContainer.Name = "ActionContainer"
+	actionContainer.BackgroundTransparency = 1
+	actionContainer.Size = UDim2.new(0, 100, 0, 60)
+	actionContainer.Parent = card
+
+	local actionLayout = Instance.new("UIListLayout")
+	actionLayout.Padding = UDim.new(0, 5)
+	actionLayout.FillDirection = Enum.FillDirection.Vertical
+	actionLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	actionLayout.Parent = actionContainer
+
+	local priceLabel = CreateLabel(actionContainer, FormatMoney(brainrot.price), 12, Colors.Gold, Enum.Font.GothamBold)
+	priceLabel.Size = UDim2.new(1, 0, 0, 20)
+	priceLabel.TextXAlignment = Enum.TextXAlignment.Center
+
+	local buyButton = CreateButton(actionContainer, "BUY", 11, Colors.GoldBright, Colors.BG, function()
+		BuyBrainrot:FireServer(brainrot.id)
+	end)
+	buyButton.Size = UDim2.new(0.8, 0, 0, 25)
+
+	return card
+end
+
+-- ============================================================================
+-- INVENTORY REFRESH
+-- ============================================================================
+
+local function RefreshInventoryUI()
+	-- Clear existing cards
+	for _, child in ipairs(InventoryScrollFrame:GetChildren()) do
+		if child:IsA("Frame") and child.Name:find("BrainrotCard") then
+			child:Destroy()
+		end
+	end
+
+	-- Create new cards
+	for i, brainrot in ipairs(State.inventory) do
+		CreateInventoryCard(brainrot, i)
+	end
+
+	-- Update canvas size
+	local gridHeight = math.ceil(#State.inventory / 3) * 190
+	InventoryScrollFrame.CanvasSize = UDim2.new(0, 0, 0, math.max(0, gridHeight))
+
+	-- Update stats
+	local totalOwned = #State.inventory
+	local totalIncome = 0
+	local pedestalCount = 0
+
+	for _, brainrot in ipairs(State.inventory) do
+		if brainrot.pedestalSlot and brainrot.pedestalSlot > 0 then
+			totalIncome = totalIncome + brainrot.incomePerMin
+			pedestalCount = pedestalCount + 1
+		end
+	end
+
+	StatTotalOwned.Text = "Owned: " .. totalOwned
+	StatIncomePerMin.Text = "Income: " .. FormatMoney(totalIncome) .. "/min"
+	StatPedestalSlots.Text = "Pedestals: " .. pedestalCount .. "/" .. State.maxSlots
+	State.incomePerMin = totalIncome
+
+	-- Also refresh hotbar
+	RefreshHotbar()
+end
+
+-- ============================================================================
+-- SHOP REFRESH
+-- ============================================================================
+
+local function RefreshShopUI()
+	for _, child in ipairs(ShopScrollFrame:GetChildren()) do
+		if child:IsA("Frame") and child.Name:find("ShopCard") then
+			child:Destroy()
+		end
+	end
+
+	for i, brainrot in ipairs(State.shopData) do
+		CreateShopCard(brainrot, i)
+	end
+
+	local scrollHeight = math.max(0, (#State.shopData * 100))
+	ShopScrollFrame.CanvasSize = UDim2.new(0, 0, 0, scrollHeight)
+end
+
+-- ============================================================================
+-- EVENT HANDLERS
+-- ============================================================================
+
+-- Inventory sync from server
+SyncInventory.OnClientEvent:Connect(function(inventory, maxSlots)
+	State.inventory = inventory or {}
+	if maxSlots then
+		State.maxSlots = maxSlots
+	end
+
+	-- If selected slot is out of bounds OR equipped brainrot got placed, deselect
+	local hotbarInv = getHotbarInventory()
+	local shouldDeselect = false
+	if State.selectedSlot > #hotbarInv then
+		shouldDeselect = true
+	elseif State.equippedBrainrotId ~= "" then
+		-- Check if the equipped brainrot is still in the hotbar (not placed)
+		local stillInHotbar = false
+		for _, b in ipairs(hotbarInv) do
+			if b.id == State.equippedBrainrotId then
+				stillInHotbar = true
+				break
+			end
+		end
+		if not stillInHotbar then
+			shouldDeselect = true
+		end
+	end
+	if shouldDeselect then
+		State.selectedSlot = 0
+		State.equippedBrainrotId = ""
+		EquipBrainrot:FireServer("")
+	end
+
+	RefreshInventoryUI()
+end)
+
+-- Pending income sync from server (used for hotbar income display)
+SyncPendingIncome.OnClientEvent:Connect(function(pendingAmount, incomePerMin)
+	State.pendingIncome = pendingAmount or 0
+
+	if incomePerMin then
+		State.incomePerMin = incomePerMin
+	end
+
+	-- Refresh hotbar to update income indicator
+	RefreshHotbar()
+end)
+
+-- Shop data sync from server
+SyncShopData.OnClientEvent:Connect(function(shopData)
+	State.shopData = shopData or {}
+	RefreshShopUI()
+end)
+
+-- Pickup toast from server
+ShowPickupToast.OnClientEvent:Connect(function(brainrotName, rarity, price)
+	ShowPickupToastUI(brainrotName, rarity, price)
+end)
+
+-- Server tells us to open the shop (triggered by Brainrot Dealer NPC)
+OpenShopUI.OnClientEvent:Connect(function()
+	ShopPanel.Visible = true
+	TweenElement(ShopPanel, {Position = UDim2.new(0.5, -250, 0.5, -275)}, 0.3)
+	RequestShopData:FireServer()
+end)
+
+-- Server tells us to open inventory
+OpenInventoryUI.OnClientEvent:Connect(function()
+	InventoryPanel.Visible = true
+	TweenElement(InventoryPanel, {Position = UDim2.new(0.5, -275, 0.5, -250)}, 0.3)
+	RequestInventory:FireServer()
+end)
+
+-- ============================================================================
+-- PERIODIC INCOME SYNC
+-- ============================================================================
+
+task.spawn(function()
+	while true do
+		task.wait(10)
+		RequestPendingIncome:FireServer()
+	end
+end)
+
+-- ============================================================================
+-- INITIALIZATION
+-- ============================================================================
+
+-- Request initial state from server
+RequestInventory:FireServer()
+RequestPendingIncome:FireServer()
+
+-- Initial hotbar render
+RefreshHotbar()
+
+print("[BrainrotClient] Loaded successfully!")
