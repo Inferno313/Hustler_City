@@ -1,0 +1,401 @@
+--[[
+	BrainrotConfig.lua  (ModuleScript)
+	Place in ServerScriptService as "BrainrotConfig"
+
+	Defines every brainrot: name, rarity, income, images, shop price, spawn weight.
+	Require this from both BrainrotService and BrainrotServer.
+--]]
+
+local InsertService = game:GetService("InsertService")
+
+local BrainrotConfig = {}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- MESH LOADING (shared by BrainrotServer + BrainrotService)
+-- Loads UGC accessory models via InsertService, caches the template MeshPart
+-- ═══════════════════════════════════════════════════════════════════════════
+local _meshCache = {}  -- { [accessoryId] = MeshPart template  |  false }
+
+--- Try to load the 3D mesh for a brainrot from the Roblox catalog.
+--- Returns a CLONE of the cached MeshPart, or nil if no mesh is available.
+function BrainrotConfig.loadMesh(accessoryId)
+	if not accessoryId then return nil end
+
+	-- Return cached result (false = previously failed, don't retry)
+	if _meshCache[accessoryId] ~= nil then
+		if _meshCache[accessoryId] == false then return nil end
+		return _meshCache[accessoryId]:Clone()
+	end
+
+	local ok, assetModel = pcall(function()
+		return InsertService:LoadAsset(accessoryId)
+	end)
+
+	if not ok or not assetModel then
+		warn("[BrainrotConfig] Failed to load accessory " .. tostring(accessoryId))
+		_meshCache[accessoryId] = false
+		return nil
+	end
+
+	-- UGC accessories: Model > Accessory > Handle (MeshPart)
+	local meshPart = nil
+	for _, desc in ipairs(assetModel:GetDescendants()) do
+		if desc:IsA("MeshPart") then
+			meshPart = desc
+			break
+		end
+	end
+
+	-- Fallback: Part with SpecialMesh inside
+	if not meshPart then
+		for _, desc in ipairs(assetModel:GetDescendants()) do
+			if desc:IsA("BasePart") and desc:FindFirstChildWhichIsA("SpecialMesh") then
+				meshPart = desc
+				break
+			end
+		end
+	end
+
+	if meshPart then
+		meshPart.Parent = nil  -- detach from loaded model tree
+		meshPart.Anchored = true
+		meshPart.CanCollide = false
+		_meshCache[accessoryId] = meshPart
+		assetModel:Destroy()
+		return meshPart:Clone()
+	end
+
+	warn("[BrainrotConfig] No MeshPart found in accessory " .. tostring(accessoryId))
+	assetModel:Destroy()
+	_meshCache[accessoryId] = false
+	return nil
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- RARITY DEFINITIONS
+-- ═══════════════════════════════════════════════════════════════════════════
+BrainrotConfig.Rarities = {
+	Common    = { Order = 1, Color = Color3.fromRGB(180, 180, 180), Label = "Common"    },
+	Uncommon  = { Order = 2, Color = Color3.fromRGB(80,  200, 80),  Label = "Uncommon"  },
+	Rare      = { Order = 3, Color = Color3.fromRGB(60,  130, 255), Label = "Rare"      },
+	Epic      = { Order = 4, Color = Color3.fromRGB(180, 60,  255), Label = "Epic"      },
+	Legendary = { Order = 5, Color = Color3.fromRGB(255, 180, 0),   Label = "Legendary" },
+	Mythic    = { Order = 6, Color = Color3.fromRGB(255, 50,  50),  Label = "Mythic"    },
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- BRAINROT REGISTRY
+--
+--   id            : unique string key (used in data saving)
+--   name          : display name
+--   rarity        : key into Rarities table above
+--   incomePerMin  : cash earned per minute when placed on a pedestal
+--   imageId       : Roblox asset id for the decal / UI image
+--   shopPrice     : nil = cannot be bought (street only), number = shop price
+--   streetSpawn   : true = can appear on the streets
+--   spawnWeight   : relative weight for street spawn pool (higher = more common)
+--   description   : flavour text for the shop / inventory
+--   modelColor    : base part color for the 3D street model (fallback if no mesh)
+--   accessoryId   : Roblox UGC catalog asset ID to load the real 3D model via InsertService
+--                   Set to nil to use the cube+decal fallback
+-- ═══════════════════════════════════════════════════════════════════════════
+BrainrotConfig.Brainrots = {
+	-- ──────────────── COMMON ────────────────
+	{
+		id           = "tung_tung",
+		name         = "Tung Tung Sahur",
+		rarity       = "Common",
+		incomePerMin = 2,
+		imageId      = "rbxassetid://125237730664411",
+		accessoryId  = 136025176392318,  -- Los Tungtungtungcitos [Steal A Brainrot]
+		shopPrice    = 500,
+		streetPrice  = 500,
+		streetSpawn  = true,
+		spawnWeight  = 10,
+		description  = "The OG drum-banger. Wakes up the whole neighbourhood.",
+		modelColor   = Color3.fromRGB(200, 170, 60),
+	},
+	{
+		id           = "tralalero",
+		name         = "Tralalero Tralala",
+		rarity       = "Common",
+		incomePerMin = 2,
+		imageId      = "rbxassetid://91743837862476",
+		accessoryId  = 87488086496966,   -- Extinct Tralalero [Steal A Brainrot]
+		shopPrice    = 500,
+		streetPrice  = 500,
+		streetSpawn  = true,
+		spawnWeight  = 10,
+		description  = "Sharkman with sneakers. Don't ask why.",
+		modelColor   = Color3.fromRGB(60, 120, 200),
+	},
+	{
+		id           = "bombardiro",
+		name         = "Bombardiro Crocodilo",
+		rarity       = "Common",
+		incomePerMin = 3,
+		imageId      = "rbxassetid://91743837862476",  -- placeholder
+		accessoryId  = 102888249858661,  -- Bombardino Crocodillo from italian Brainrot
+		shopPrice    = 500,
+		streetPrice  = 500,
+		streetSpawn  = true,
+		spawnWeight  = 8,
+		description  = "Half croc, half bomber plane. 100% brainrot.",
+		modelColor   = Color3.fromRGB(50, 140, 50),
+	},
+	-- ──────────────── UNCOMMON ────────────────
+	{
+		id           = "brr_patapim",
+		name         = "Brr Brr Patapim",
+		rarity       = "Uncommon",
+		incomePerMin = 5,
+		imageId      = "rbxassetid://91743837862476",  -- placeholder
+		accessoryId  = 128318030015272,  -- Brr Brr Patapim Italian Brainrot
+		shopPrice    = 1000,
+		streetPrice  = 1000,
+		streetSpawn  = true,
+		spawnWeight  = 6,
+		description  = "Cold. Icy. Patapim. Brr.",
+		modelColor   = Color3.fromRGB(100, 180, 220),
+	},
+	{
+		id           = "lirili",
+		name         = "Lirili Larila",
+		rarity       = "Uncommon",
+		incomePerMin = 5,
+		imageId      = "rbxassetid://91743837862476",  -- placeholder
+		accessoryId  = nil,  -- no UGC found yet, uses cube fallback
+		shopPrice    = 1000,
+		streetPrice  = 1000,
+		streetSpawn  = true,
+		spawnWeight  = 6,
+		description  = "Butterfly vibes. Floats around aimlessly.",
+		modelColor   = Color3.fromRGB(220, 120, 220),
+	},
+	{
+		id           = "boneca",
+		name         = "Boneca Ambalabu",
+		rarity       = "Uncommon",
+		incomePerMin = 6,
+		imageId      = "rbxassetid://91743837862476",  -- placeholder
+		accessoryId  = nil,  -- no UGC found yet, uses cube fallback
+		shopPrice    = 1000,
+		streetPrice  = 1000,
+		streetSpawn  = true,
+		spawnWeight  = 5,
+		description  = "Cursed doll energy. You've been warned.",
+		modelColor   = Color3.fromRGB(200, 80, 80),
+	},
+	-- ──────────────── RARE ────────────────
+	{
+		id           = "chimpanzini",
+		name         = "Chimpanzini Bananini",
+		rarity       = "Rare",
+		incomePerMin = 12,
+		imageId      = "rbxassetid://91743837862476",  -- placeholder
+		accessoryId  = nil,  -- no UGC found yet, uses cube fallback
+		shopPrice    = 2000,
+		streetPrice  = 2000,
+		streetSpawn  = false,
+		spawnWeight  = 0,
+		description  = "Monkey business, literally. Premium banana trader.",
+		modelColor   = Color3.fromRGB(160, 120, 50),
+	},
+	{
+		id           = "tung_tung_tung",
+		name         = "Tung Tung Tung Sahur",
+		rarity       = "Rare",
+		incomePerMin = 15,
+		imageId      = "rbxassetid://125237730664411",
+		accessoryId  = 136676476823417,  -- Coffin Tung Tung Tung Sahur [Steal A Brainrot]
+		shopPrice    = 2000,
+		streetPrice  = 2000,
+		streetSpawn  = false,
+		spawnWeight  = 0,
+		description  = "Triple the tung, triple the drums.",
+		modelColor   = Color3.fromRGB(220, 190, 50),
+	},
+	{
+		id           = "glorbo",
+		name         = "Glorbo Fruttodrillo",
+		rarity       = "Rare",
+		incomePerMin = 15,
+		imageId      = "rbxassetid://91743837862476",  -- placeholder
+		accessoryId  = nil,  -- no UGC found yet, uses cube fallback
+		shopPrice    = 2000,
+		streetPrice  = 2000,
+		streetSpawn  = false,
+		spawnWeight  = 0,
+		description  = "Fruit-drill hybrid. Makes smoothies at deadly RPM.",
+		modelColor   = Color3.fromRGB(180, 220, 60),
+	},
+	-- ──────────────── EPIC ────────────────
+	{
+		id           = "cappuccino",
+		name         = "Cappuccino Assassino",
+		rarity       = "Epic",
+		incomePerMin = 30,
+		imageId      = "rbxassetid://91743837862476",  -- placeholder
+		accessoryId  = 129517548928613,  -- cappuccino assassino UGC
+		shopPrice    = 10000,
+		streetPrice  = 10000,
+		streetSpawn  = false,
+		spawnWeight  = 0,
+		description  = "Coffee-powered hitman. One shot, one espresso.",
+		modelColor   = Color3.fromRGB(120, 80, 40),
+	},
+	{
+		id           = "la_vaca",
+		name         = "La Vaca Saturno Saturnita",
+		rarity       = "Epic",
+		incomePerMin = 35,
+		imageId      = "rbxassetid://91743837862476",  -- placeholder
+		accessoryId  = nil,  -- no UGC found yet, uses cube fallback
+		shopPrice    = 10000,
+		streetPrice  = 10000,
+		streetSpawn  = false,
+		spawnWeight  = 0,
+		description  = "Space cow from Saturn's rings. Premium milk.",
+		modelColor   = Color3.fromRGB(200, 200, 220),
+	},
+	{
+		id           = "ballerina",
+		name         = "Ballerina Cappuccina",
+		rarity       = "Epic",
+		incomePerMin = 40,
+		imageId      = "rbxassetid://91743837862476",  -- placeholder
+		accessoryId  = nil,  -- no UGC found yet, uses cube fallback
+		shopPrice    = 10000,
+		streetPrice  = 10000,
+		streetSpawn  = false,
+		spawnWeight  = 0,
+		description  = "Graceful. Caffeinated. Unstoppable.",
+		modelColor   = Color3.fromRGB(255, 180, 200),
+	},
+	-- ──────────────── LEGENDARY ────────────────
+	{
+		id           = "trippi_troppi",
+		name         = "Trippi Troppi",
+		rarity       = "Legendary",
+		incomePerMin = 80,
+		imageId      = "rbxassetid://91743837862476",  -- placeholder
+		accessoryId  = nil,  -- no UGC found yet, uses cube fallback
+		shopPrice    = 50000,
+		streetPrice  = 50000,
+		streetSpawn  = false,
+		spawnWeight  = 0,
+		description  = "Trippy turtle from another dimension. Big earner.",
+		modelColor   = Color3.fromRGB(60, 220, 180),
+	},
+	{
+		id           = "seer_of_sahur",
+		name         = "Seer of the Sahur",
+		rarity       = "Legendary",
+		incomePerMin = 100,
+		imageId      = "rbxassetid://125237730664411",
+		accessoryId  = nil,  -- no UGC found yet, uses cube fallback
+		shopPrice    = 50000,
+		streetPrice  = 50000,
+		streetSpawn  = false,
+		spawnWeight  = 0,
+		description  = "Ancient prophet of the drums. Sees all, bangs all.",
+		modelColor   = Color3.fromRGB(180, 140, 255),
+	},
+	-- ──────────────── MYTHIC ────────────────
+	{
+		id           = "il_tycoon",
+		name         = "Il Grande Tycoon",
+		rarity       = "Mythic",
+		incomePerMin = 250,
+		imageId      = "rbxassetid://91743837862476",  -- placeholder
+		accessoryId  = nil,  -- no UGC found yet, uses cube fallback
+		shopPrice    = 500000,
+		streetPrice  = 500000,
+		streetSpawn  = false,
+		spawnWeight  = 0,
+		description  = "THE boss. Runs the city. Infinite drip. Max income.",
+		modelColor   = Color3.fromRGB(255, 50, 50),
+	},
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- PEDESTAL SLOTS PER CASINO LEVEL
+-- ═══════════════════════════════════════════════════════════════════════════
+BrainrotConfig.SlotsPerLevel = {
+	[0] = 0,    -- no casino
+	[1] = 2,    -- Small
+	[2] = 4,    -- Medium
+	[3] = 6,    -- Large
+	[4] = 10,   -- Mega
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- STREET SPAWNING CONFIG
+-- ═══════════════════════════════════════════════════════════════════════════
+BrainrotConfig.Street = {
+	MinX = -170,  MaxX = 180,
+	MinZ = -110,  MaxZ = 270,
+	RaycastY = 150,           -- cast from this height downward
+	GroundMinY = 60,          -- reject hits below this
+	GroundMaxY = 100,         -- reject hits above this
+	MaxAlive = 8,             -- max street brainrots at once
+	SpawnInterval = {15, 30}, -- random seconds between spawns
+	Lifetime = 60,            -- seconds before auto-despawn
+	WanderRadius = 3,         -- studs per wander step
+	WanderInterval = {3, 6},  -- seconds between wander moves
+	PromptDistance = 10,       -- ProximityPrompt activation distance
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- INCOME CONFIG
+-- ═══════════════════════════════════════════════════════════════════════════
+BrainrotConfig.Income = {
+	TickInterval = 60,         -- server recalculates income every 60s
+	MaxOfflineMinutes = 480,   -- cap offline income at 8 hours
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- LOOKUP HELPERS
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- Quick lookup by id
+local _byId = {}
+for _, br in ipairs(BrainrotConfig.Brainrots) do
+	_byId[br.id] = br
+end
+
+function BrainrotConfig.getById(id)
+	return _byId[id]
+end
+
+-- Get all street-spawnable brainrots with cumulative weights
+local _streetPool = {}
+local _streetTotalWeight = 0
+for _, br in ipairs(BrainrotConfig.Brainrots) do
+	if br.streetSpawn and br.spawnWeight > 0 then
+		_streetTotalWeight = _streetTotalWeight + br.spawnWeight
+		table.insert(_streetPool, { brainrot = br, cumWeight = _streetTotalWeight })
+	end
+end
+
+function BrainrotConfig.getRandomStreetBrainrot()
+	local roll = math.random() * _streetTotalWeight
+	for _, entry in ipairs(_streetPool) do
+		if roll <= entry.cumWeight then
+			return entry.brainrot
+		end
+	end
+	return _streetPool[#_streetPool].brainrot
+end
+
+-- Get all shop brainrots (sorted by price)
+function BrainrotConfig.getShopBrainrots()
+	local shop = {}
+	for _, br in ipairs(BrainrotConfig.Brainrots) do
+		table.insert(shop, br)
+	end
+	table.sort(shop, function(a, b) return a.shopPrice < b.shopPrice end)
+	return shop
+end
+
+return BrainrotConfig
