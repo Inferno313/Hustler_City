@@ -1,0 +1,763 @@
+--[[
+	BrainrotServer.lua
+	Main server-side script that manages the Brainrot game server
+	Place in: ServerScriptService
+
+	UPDATED: Walk-over collection (no ProximityPrompt), holdable inventory slots
+]]
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local ServerScriptService = game:GetService("ServerScriptService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local DataManager = require(ServerScriptService:WaitForChild("DataStoreManager"))
+local BrainrotConfig = require(ServerScriptService:WaitForChild("BrainrotConfig"))
+local BrainrotService
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- INITIALIZATION
+-- ═══════════════════════════════════════════════════════════════════════════
+
+print("[BrainrotServer] Starting initialization...")
+
+-- Wait for BrainrotService to be available
+repeat
+	local servicesFolder = ServerScriptService:FindFirstChild("Services")
+	if servicesFolder then
+		local bsModule = servicesFolder:FindFirstChild("BrainrotService")
+		if bsModule then
+			BrainrotService = require(bsModule)
+		end
+	end
+	if not BrainrotService then task.wait(0.1) end
+until BrainrotService
+
+print("[BrainrotServer] BrainrotService loaded")
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- CREATE REMOTE EVENTS
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local EventsFolder = ReplicatedStorage:FindFirstChild("BrainrotEvents")
+if not EventsFolder then
+	EventsFolder = Instance.new("Folder")
+	EventsFolder.Name = "BrainrotEvents"
+	EventsFolder.Parent = ReplicatedStorage
+end
+
+local function getOrCreateEvent(name)
+	local event = EventsFolder:FindFirstChild(name)
+	if not event then
+		event = Instance.new("RemoteEvent")
+		event.Name = name
+		event.Parent = EventsFolder
+	end
+	return event
+end
+
+-- Server → Client events
+local SyncInventory      = getOrCreateEvent("SyncInventory")
+local SyncPendingIncome  = getOrCreateEvent("SyncPendingIncome")
+local ShowPickupToast    = getOrCreateEvent("ShowPickupToast")
+local OpenShopUI         = getOrCreateEvent("OpenShopUI")
+local OpenInventoryUI    = getOrCreateEvent("OpenInventoryUI")
+local SyncShopData       = getOrCreateEvent("SyncShopData")
+
+-- Client → Server events
+local CollectStreetBrainrot = getOrCreateEvent("CollectStreetBrainrot")
+local BuyBrainrot           = getOrCreateEvent("BuyBrainrot")
+local AssignPedestal        = getOrCreateEvent("AssignPedestal")
+local CollectIncome         = getOrCreateEvent("CollectIncome")
+local RequestInventory      = getOrCreateEvent("RequestInventory")
+local RequestShopData       = getOrCreateEvent("RequestShopData")
+local RequestPendingIncome  = getOrCreateEvent("RequestPendingIncome")
+local EquipBrainrot         = getOrCreateEvent("EquipBrainrot")
+
+print("[BrainrotServer] RemoteEvents created/loaded")
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- EQUIPPED BRAINROT TRACKING (which brainrot each player is "holding")
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local EquippedModels = {}  -- player -> Model in workspace attached to character
+local EquippedBrainrotIds = {} -- player -> brainrotId string (what they're "holding")
+
+local function clearEquippedModel(player)
+	if EquippedModels[player] then
+		pcall(function() EquippedModels[player]:Destroy() end)
+		EquippedModels[player] = nil
+	end
+end
+
+local function spawnEquippedModel(player, brainrotId)
+	clearEquippedModel(player)
+	if not brainrotId or brainrotId == "" then return end
+
+	local cfg = BrainrotConfig.getById(brainrotId)
+	if not cfg then return end
+
+	local character = player.Character
+	if not character then return end
+	local head = character:FindFirstChild("Head")
+	if not head then return end
+
+	-- Create a small brainrot model floating above the player's head
+	local model = Instance.new("Model")
+	model.Name = "EquippedBrainrot"
+
+	-- Try loading a real 3D mesh
+	local meshClone = BrainrotConfig.loadMesh(cfg.accessoryId)
+
+	local display
+	if meshClone then
+		display = meshClone
+		display.Name = "BrainrotDisplay"
+		display.Anchored = false
+		display.CanCollide = false
+		display.Size = Vector3.new(1.5, 1.5, 1.5)
+		display.Massless = true
+		display.Parent = model
+	else
+		-- Fallback: plain cube with decals
+		display = Instance.new("Part")
+		display.Name = "BrainrotDisplay"
+		display.Anchored = false
+		display.CanCollide = false
+		display.Size = Vector3.new(1.5, 1.5, 1.5)
+		display.Color = cfg.modelColor or Color3.fromRGB(200, 170, 60)
+		display.Material = Enum.Material.SmoothPlastic
+		display.Transparency = 0
+		display.Massless = true
+		display.TopSurface = Enum.SurfaceType.Smooth
+		display.BottomSurface = Enum.SurfaceType.Smooth
+		display.Parent = model
+
+		for _, face in ipairs({Enum.NormalId.Front, Enum.NormalId.Back, Enum.NormalId.Left, Enum.NormalId.Right}) do
+			local decal = Instance.new("Decal")
+			decal.Face = face
+			decal.Texture = cfg.imageId or ""
+			decal.Parent = display
+		end
+	end
+
+	-- Weld to head, offset above
+	local weld = Instance.new("Weld")
+	weld.Part0 = head
+	weld.Part1 = display
+	weld.C0 = CFrame.new(0, 2.2, 0)  -- float above head
+	weld.Parent = display
+
+	-- Rarity glow ring
+	local rarityInfo = BrainrotConfig.Rarities[cfg.rarity]
+	local rarityColor = rarityInfo and rarityInfo.Color or Color3.fromRGB(180, 180, 180)
+
+	local ring = Instance.new("Part")
+	ring.Name = "RarityRing"
+	ring.Anchored = false
+	ring.CanCollide = false
+	ring.Size = Vector3.new(2, 0.1, 2)
+	ring.Color = rarityColor
+	ring.Material = Enum.Material.Neon
+	ring.Massless = true
+	ring.Transparency = 0.3
+	ring.Parent = model
+
+	local ringWeld = Instance.new("Weld")
+	ringWeld.Part0 = display
+	ringWeld.Part1 = ring
+	ringWeld.C0 = CFrame.new(0, -0.8, 0)
+	ringWeld.Parent = ring
+
+	-- Billboard with name
+	local bb = Instance.new("BillboardGui")
+	bb.Size = UDim2.new(0, 150, 0, 30)
+	bb.StudsOffset = Vector3.new(0, 1.2, 0)
+	bb.AlwaysOnTop = false
+	bb.Parent = display
+
+	local nameLabel = Instance.new("TextLabel")
+	nameLabel.Size = UDim2.new(1, 0, 1, 0)
+	nameLabel.BackgroundTransparency = 1
+	nameLabel.Text = cfg.name
+	nameLabel.TextColor3 = rarityColor
+	nameLabel.Font = Enum.Font.GothamBold
+	nameLabel.TextScaled = true
+	nameLabel.Parent = bb
+
+	model.PrimaryPart = display
+	model.Parent = character
+
+	EquippedModels[player] = model
+end
+
+-- Handle equip events from client
+EquipBrainrot.OnServerEvent:Connect(function(player, brainrotId)
+	-- Validate that the player actually owns this brainrot
+	if brainrotId and brainrotId ~= "" then
+		local data = DataManager:GetData(player)
+		if not data or not data.Brainrots then return end
+		local found = false
+		for _, entry in ipairs(data.Brainrots) do
+			if entry.id == brainrotId then
+				found = true
+				break
+			end
+		end
+		if not found then return end
+		EquippedBrainrotIds[player] = brainrotId
+	else
+		EquippedBrainrotIds[player] = nil
+	end
+
+	spawnEquippedModel(player, brainrotId)
+end)
+
+-- Clean up on character removal
+Players.PlayerAdded:Connect(function(player)
+	player.CharacterRemoving:Connect(function()
+		clearEquippedModel(player)
+	end)
+end)
+
+-- Share the equipped-brainrot tracker with BrainrotService so pedestal ProximityPrompts
+-- can check what the player is holding and auto-place it
+BrainrotService.setEquippedTracker(EquippedBrainrotIds, function(player)
+	-- After placing a brainrot, unequip the held model above the player's head
+	EquippedBrainrotIds[player] = nil
+	spawnEquippedModel(player, "")
+	-- Client will auto-deselect when it receives the SyncInventory update
+	-- (the placed brainrot will have pedestalSlot > 0 so it leaves the hotbar)
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- STREET SPAWNER SYSTEM
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local StreetBrainrots = Instance.new("Folder")
+StreetBrainrots.Name = "StreetBrainrots"
+StreetBrainrots.Parent = workspace
+
+local CITY_BOUNDS = {
+	X = {min = -170, max = 180},
+	Z = {min = -110, max = 270},
+	Y = {min = 60, max = 100}
+}
+
+local STREET_BRAINROT_SIZE = Vector3.new(2, 3, 2)
+local RAYCAST_FROM_HEIGHT = 150
+local MAX_STREET_BRAINROTS = 8
+local SPAWN_INTERVAL_MIN = 15
+local SPAWN_INTERVAL_MAX = 30
+local STREET_BRAINROT_LIFETIME = 60
+local WANDER_INTERVAL_MIN = 3
+local WANDER_INTERVAL_MAX = 6
+local WANDER_DISTANCE_MIN = 2
+local WANDER_DISTANCE_MAX = 3
+local WANDER_TWEEN_TIME = 1
+
+-- ProximityPrompt settings for street brainrot purchase
+local PURCHASE_HOLD_DURATION = 0.5  -- seconds to hold E
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- UTILITY: Raycast to find ground
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local function findGroundPosition(x, z)
+	local rayOrigin = Vector3.new(x, RAYCAST_FROM_HEIGHT, z)
+	local rayDirection = Vector3.new(0, -200, 0)
+
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+	raycastParams.FilterDescendantsInstances = {StreetBrainrots}
+
+	local result = workspace:Raycast(rayOrigin, rayDirection, raycastParams)
+
+	if result then
+		local hitY = result.Position.Y
+		if hitY >= CITY_BOUNDS.Y.min and hitY <= CITY_BOUNDS.Y.max then
+			return Vector3.new(x, hitY + (STREET_BRAINROT_SIZE.Y / 2), z)
+		end
+	end
+
+	return nil
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- CREATE STREET BRAINROT MODEL (with hold-E purchase prompt)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local function createStreetBrainrotModel(brainrotData, position)
+	local model = Instance.new("Model")
+	model.Name = brainrotData.name
+
+	-- Try loading a real 3D mesh from the catalog
+	local meshClone = BrainrotConfig.loadMesh(brainrotData.accessoryId)
+
+	local bodyPart
+	if meshClone then
+		-- Use the real mesh
+		bodyPart = meshClone
+		bodyPart.Name = "Body"
+		bodyPart.Anchored = true
+		bodyPart.CanCollide = false
+		bodyPart.Size = STREET_BRAINROT_SIZE  -- scale to street brainrot size
+		bodyPart.CFrame = CFrame.new(position)
+		bodyPart.Parent = model
+	else
+		-- Fallback: plain cube with decals
+		bodyPart = Instance.new("Part")
+		bodyPart.Name = "Body"
+		bodyPart.Shape = Enum.PartType.Block
+		bodyPart.Size = STREET_BRAINROT_SIZE
+		bodyPart.Anchored = true
+		bodyPart.CanCollide = false
+		bodyPart.CFrame = CFrame.new(position)
+		bodyPart.Color = brainrotData.modelColor or Color3.fromRGB(200, 170, 60)
+		bodyPart.Material = Enum.Material.SmoothPlastic
+		bodyPart.TopSurface = Enum.SurfaceType.Smooth
+		bodyPart.BottomSurface = Enum.SurfaceType.Smooth
+		bodyPart.Parent = model
+
+		local imageUrl = brainrotData.imageId or ""
+		local faces = {Enum.NormalId.Front, Enum.NormalId.Back, Enum.NormalId.Left, Enum.NormalId.Right}
+		for _, face in ipairs(faces) do
+			local decal = Instance.new("Decal")
+			decal.Texture = imageUrl
+			decal.Face = face
+			decal.Parent = bodyPart
+		end
+	end
+
+	-- Get rarity color
+	local rarityInfo = BrainrotConfig.Rarities[brainrotData.rarity]
+	local rarityColor = rarityInfo and rarityInfo.Color or Color3.fromRGB(180, 180, 180)
+
+	-- Billboard GUI with name + rarity + price
+	local billboardGui = Instance.new("BillboardGui")
+	billboardGui.Name = "NameTag"
+	billboardGui.Size = UDim2.new(4, 0, 2.5, 0)
+	billboardGui.MaxDistance = 100
+	billboardGui.StudsOffset = Vector3.new(0, 3, 0)
+	billboardGui.Parent = bodyPart
+
+	local textLabel = Instance.new("TextLabel")
+	textLabel.Name = "NameLabel"
+	textLabel.Size = UDim2.new(1, 0, 0.4, 0)
+	textLabel.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	textLabel.BackgroundTransparency = 0.3
+	textLabel.TextColor3 = rarityColor
+	textLabel.TextSize = 14
+	textLabel.Font = Enum.Font.GothamBold
+	textLabel.Text = brainrotData.name
+	textLabel.TextWrapped = true
+	textLabel.Parent = billboardGui
+
+	local rarityLabel = Instance.new("TextLabel")
+	rarityLabel.Name = "RarityLabel"
+	rarityLabel.Size = UDim2.new(1, 0, 0.25, 0)
+	rarityLabel.Position = UDim2.new(0, 0, 0.42, 0)
+	rarityLabel.BackgroundTransparency = 1
+	rarityLabel.TextColor3 = rarityColor
+	rarityLabel.TextSize = 11
+	rarityLabel.Font = Enum.Font.GothamMedium
+	rarityLabel.Text = "★ " .. brainrotData.rarity .. " ★"
+	rarityLabel.Parent = billboardGui
+
+	-- Price label
+	local price = brainrotData.streetPrice or brainrotData.shopPrice or 0
+	local priceLabel = Instance.new("TextLabel")
+	priceLabel.Name = "PriceLabel"
+	priceLabel.Size = UDim2.new(1, 0, 0.25, 0)
+	priceLabel.Position = UDim2.new(0, 0, 0.7, 0)
+	priceLabel.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	priceLabel.BackgroundTransparency = 0.3
+	priceLabel.TextColor3 = Color3.fromRGB(255, 215, 0)
+	priceLabel.TextSize = 14
+	priceLabel.Font = Enum.Font.GothamBold
+	priceLabel.Text = "$" .. tostring(price)
+	priceLabel.Parent = billboardGui
+
+	-- ══════════════════════════════════════════════════════════════
+	-- HOLD E TO PURCHASE (ProximityPrompt on the body)
+	-- ══════════════════════════════════════════════════════════════
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.Name = "PurchasePrompt"
+	prompt.ActionText = "Purchase"
+	prompt.ObjectText = brainrotData.name .. " - $" .. tostring(price)
+	prompt.HoldDuration = PURCHASE_HOLD_DURATION
+	prompt.MaxActivationDistance = 10
+	prompt.KeyboardKeyCode = Enum.KeyCode.E
+	prompt.RequiresLineOfSight = false
+	prompt.Parent = bodyPart
+
+	-- Metadata
+	model:SetAttribute("BrainrotId", brainrotData.id)
+	model:SetAttribute("Collected", false)
+
+	model.PrimaryPart = bodyPart
+	model.Parent = StreetBrainrots
+
+	return model, bodyPart, prompt
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- STREET BRAINROT WANDER
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local function startWandering(model, bodyPart)
+	local function wander()
+		if not model.Parent then return end
+
+		local randomAngle = math.random() * math.pi * 2
+		local randomDistance = WANDER_DISTANCE_MIN + (math.random() * (WANDER_DISTANCE_MAX - WANDER_DISTANCE_MIN))
+
+		local offsetX = math.cos(randomAngle) * randomDistance
+		local offsetZ = math.sin(randomAngle) * randomDistance
+
+		local newX = bodyPart.Position.X + offsetX
+		local newZ = bodyPart.Position.Z + offsetZ
+
+		newX = math.max(CITY_BOUNDS.X.min, math.min(CITY_BOUNDS.X.max, newX))
+		newZ = math.max(CITY_BOUNDS.Z.min, math.min(CITY_BOUNDS.Z.max, newZ))
+
+		local groundPos = findGroundPosition(newX, newZ)
+		if groundPos then
+			local tweenInfo = TweenInfo.new(
+				WANDER_TWEEN_TIME,
+				Enum.EasingStyle.Linear,
+				Enum.EasingDirection.InOut
+			)
+			local tween = TweenService:Create(bodyPart, tweenInfo, {CFrame = CFrame.new(groundPos)})
+			tween:Play()
+			-- ProximityPrompt is parented to bodyPart, so it moves automatically
+		end
+	end
+
+	task.spawn(function()
+		while model.Parent do
+			task.wait(WANDER_INTERVAL_MIN + math.random() * (WANDER_INTERVAL_MAX - WANDER_INTERVAL_MIN))
+			wander()
+		end
+	end)
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- HOLD E TO PURCHASE HANDLER (ProximityPrompt)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local function handlePurchasePrompt(model, prompt, brainrotData)
+	prompt.Triggered:Connect(function(playerWhoTriggered)
+		if not model.Parent then return end
+		if model:GetAttribute("Collected") then return end
+
+		-- Check if player can afford it
+		local streetPrice = brainrotData.streetPrice or brainrotData.shopPrice or 0
+		local playerData = DataManager:GetData(playerWhoTriggered)
+		if not playerData then return end
+
+		if (playerData.Cash or 0) < streetPrice then
+			ShowPickupToast:FireClient(playerWhoTriggered, brainrotData.name, brainrotData.rarity, -1)
+			return
+		end
+
+		-- Mark as collected immediately to prevent double-purchase
+		model:SetAttribute("Collected", true)
+		prompt.Enabled = false  -- disable prompt so no one else can trigger it
+
+		local success, err = pcall(function()
+			-- Deduct cash
+			playerData.Cash = (playerData.Cash or 0) - streetPrice
+			playerData.TotalWagered = (playerData.TotalWagered or 0) + streetPrice
+
+			-- Sync HUD cash
+			local Events = ReplicatedStorage:FindFirstChild("Events")
+			if Events then
+				local updateCurrency = Events:FindFirstChild("UpdateCurrency")
+				if updateCurrency then
+					updateCurrency:FireClient(playerWhoTriggered, playerData.Cash)
+				end
+			end
+
+			-- Add to player's inventory
+			BrainrotService.addBrainrot(playerWhoTriggered, brainrotData.id)
+
+			-- Fire pickup toast
+			ShowPickupToast:FireClient(playerWhoTriggered, brainrotData.name, brainrotData.rarity, streetPrice)
+
+			-- Sync inventory
+			local inventory, maxSlots = BrainrotService.getInventory(playerWhoTriggered)
+			SyncInventory:FireClient(playerWhoTriggered, inventory, maxSlots)
+		end)
+
+		if success then
+			-- Quick shrink animation then destroy
+			local bodyPart = model:FindFirstChild("Body")
+			if bodyPart then
+				local tweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In)
+				local shrink = TweenService:Create(bodyPart, tweenInfo, {Size = Vector3.new(0.1, 0.1, 0.1)})
+				shrink:Play()
+				shrink.Completed:Connect(function()
+					if model.Parent then model:Destroy() end
+				end)
+			else
+				model:Destroy()
+			end
+		else
+			warn("[BrainrotServer] Error purchasing brainrot for", playerWhoTriggered.Name, ":", err)
+			model:SetAttribute("Collected", false)
+			prompt.Enabled = true  -- re-enable so they can retry
+		end
+	end)
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- SPAWN STREET BRAINROT
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local function spawnStreetBrainrot()
+	if #StreetBrainrots:GetChildren() >= MAX_STREET_BRAINROTS then
+		return
+	end
+
+	local brainrotData = BrainrotConfig.getRandomStreetBrainrot()
+	if not brainrotData then return end
+
+	local x = CITY_BOUNDS.X.min + math.random() * (CITY_BOUNDS.X.max - CITY_BOUNDS.X.min)
+	local z = CITY_BOUNDS.Z.min + math.random() * (CITY_BOUNDS.Z.max - CITY_BOUNDS.Z.min)
+
+	local position = findGroundPosition(x, z)
+	if not position then return end
+
+	local ok, model, bodyPart, prompt = pcall(function()
+		return createStreetBrainrotModel(brainrotData, position)
+	end)
+
+	if not ok then
+		warn("[BrainrotServer] Failed to create street brainrot:", model)
+		return
+	end
+
+	-- Start wandering
+	startWandering(model, bodyPart)
+
+	-- Handle hold-E purchase
+	handlePurchasePrompt(model, prompt, brainrotData)
+
+	-- Auto-despawn after lifetime
+	task.delay(STREET_BRAINROT_LIFETIME, function()
+		if model.Parent then
+			model:Destroy()
+		end
+	end)
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- STREET SPAWNER LOOP
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local function startStreetSpawner()
+	print("[BrainrotServer] Street spawner started")
+
+	while true do
+		task.wait(SPAWN_INTERVAL_MIN + math.random() * (SPAWN_INTERVAL_MAX - SPAWN_INTERVAL_MIN))
+		spawnStreetBrainrot()
+	end
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- EVENT HANDLERS
+-- ═══════════════════════════════════════════════════════════════════════════
+
+print("[BrainrotServer] Setting up event handlers...")
+
+-- CollectIncome handler
+CollectIncome.OnServerEvent:Connect(function(player)
+	local ok, err = pcall(function()
+		local amount = BrainrotService.collectIncome(player)
+		local pending, ipm = BrainrotService.getPendingIncome(player)
+		SyncPendingIncome:FireClient(player, pending, ipm)
+
+		local inventory, maxSlots = BrainrotService.getInventory(player)
+		SyncInventory:FireClient(player, inventory, maxSlots)
+	end)
+
+	if not ok then
+		warn("[BrainrotServer] Error collecting income for", player.Name, ":", err)
+	end
+end)
+
+-- BuyBrainrot handler
+BuyBrainrot.OnServerEvent:Connect(function(player, brainrotId)
+	local ok, err = pcall(function()
+		local success, msg = BrainrotService.buyBrainrot(player, brainrotId)
+
+		local inventory, maxSlots = BrainrotService.getInventory(player)
+		SyncInventory:FireClient(player, inventory, maxSlots)
+
+		local pending, ipm = BrainrotService.getPendingIncome(player)
+		SyncPendingIncome:FireClient(player, pending, ipm)
+	end)
+
+	if not ok then
+		warn("[BrainrotServer] Error buying brainrot for", player.Name, ":", err)
+	end
+end)
+
+-- AssignPedestal handler
+AssignPedestal.OnServerEvent:Connect(function(player, brainrotId, slot)
+	local ok, err = pcall(function()
+		local data = DataManager:GetData(player)
+		if not data or not data.Brainrots then return end
+
+		local inventoryIndex = nil
+		for i, entry in ipairs(data.Brainrots) do
+			if entry.id == brainrotId then
+				if slot == 0 then
+					if entry.pedestalSlot and entry.pedestalSlot > 0 then
+						inventoryIndex = i
+						break
+					end
+				else
+					if (entry.pedestalSlot or 0) == 0 then
+						inventoryIndex = i
+						break
+					end
+				end
+			end
+		end
+
+		if not inventoryIndex then
+			for i, entry in ipairs(data.Brainrots) do
+				if entry.id == brainrotId then
+					inventoryIndex = i
+					break
+				end
+			end
+		end
+
+		if inventoryIndex then
+			BrainrotService.assignToPedestal(player, inventoryIndex, slot or 0)
+		end
+
+		local inventory, maxSlots = BrainrotService.getInventory(player)
+		SyncInventory:FireClient(player, inventory, maxSlots)
+	end)
+
+	if not ok then
+		warn("[BrainrotServer] Error assigning pedestal for", player.Name, ":", err)
+	end
+end)
+
+-- RequestInventory handler
+RequestInventory.OnServerEvent:Connect(function(player)
+	local ok, err = pcall(function()
+		local inventory, maxSlots = BrainrotService.getInventory(player)
+		SyncInventory:FireClient(player, inventory, maxSlots)
+	end)
+
+	if not ok then
+		warn("[BrainrotServer] Error syncing inventory for", player.Name, ":", err)
+	end
+end)
+
+-- RequestShopData handler
+RequestShopData.OnServerEvent:Connect(function(player)
+	local ok, err = pcall(function()
+		local shopBrainrots = BrainrotConfig.getShopBrainrots()
+
+		local shopData = {}
+		for _, br in ipairs(shopBrainrots) do
+			table.insert(shopData, {
+				id           = br.id,
+				name         = br.name,
+				rarity       = br.rarity,
+				incomePerMin = br.incomePerMin,
+				imageId      = br.imageId,
+				price        = br.shopPrice,
+				description  = br.description,
+			})
+		end
+
+		SyncShopData:FireClient(player, shopData)
+
+		local inventory, maxSlots = BrainrotService.getInventory(player)
+		SyncInventory:FireClient(player, inventory, maxSlots)
+	end)
+
+	if not ok then
+		warn("[BrainrotServer] Error syncing shop data for", player.Name, ":", err)
+	end
+end)
+
+-- RequestPendingIncome handler
+RequestPendingIncome.OnServerEvent:Connect(function(player)
+	local ok, err = pcall(function()
+		local pending, ipm = BrainrotService.getPendingIncome(player)
+		SyncPendingIncome:FireClient(player, pending, ipm)
+	end)
+
+	if not ok then
+		warn("[BrainrotServer] Error syncing pending income for", player.Name, ":", err)
+	end
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- INCOME TICKER (ticks income every 10 seconds, updates tile displays every 2 seconds)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local function startIncomeTicker()
+	print("[BrainrotServer] Income ticker started")
+
+	while true do
+		task.wait(10)  -- Tick income every 10 seconds for responsive tile updates
+
+		for _, player in ipairs(Players:GetPlayers()) do
+			local ok, err = pcall(function()
+				BrainrotService.tickIncome(player)
+				BrainrotService.updateTileDisplays(player)
+
+				local pending, ipm = BrainrotService.getPendingIncome(player)
+				SyncPendingIncome:FireClient(player, pending, ipm)
+			end)
+
+			if not ok then
+				warn("[BrainrotServer] Error ticking income for", player.Name, ":", err)
+			end
+		end
+	end
+end
+
+-- Faster tile display refresh (every 2 seconds, updates the cash label on floor tiles)
+local function startTileDisplayUpdater()
+	print("[BrainrotServer] Tile display updater started")
+
+	while true do
+		task.wait(2)
+
+		for _, player in ipairs(Players:GetPlayers()) do
+			pcall(function()
+				BrainrotService.updateTileDisplays(player)
+			end)
+		end
+	end
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- CLEANUP ON PLAYER LEAVE
+-- ═══════════════════════════════════════════════════════════════════════════
+
+Players.PlayerRemoving:Connect(function(player)
+	clearEquippedModel(player)
+	EquippedBrainrotIds[player] = nil
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- STARTUP
+-- ═══════════════════════════════════════════════════════════════════════════
+
+task.spawn(startStreetSpawner)
+task.spawn(startIncomeTicker)
+task.spawn(startTileDisplayUpdater)
+
+print("[BrainrotServer] Server fully initialized and running!")
