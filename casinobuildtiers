@@ -1,0 +1,1304 @@
+local CasinoBuilderTiers = {}
+-- ============================================================================
+-- COLOR PALETTE
+-- ============================================================================
+local C = {
+	-- Exterior
+	WallExt     = Color3.fromRGB(85, 80, 95),      -- dark grey-purple exterior
+	WallExtLt   = Color3.fromRGB(110, 105, 120),    -- lighter accent
+	Trim        = Color3.fromRGB(55, 50, 65),        -- dark trim
+	Gold        = Color3.fromRGB(195, 160, 50),      -- gold accents (not blinding)
+	GoldBright  = Color3.fromRGB(212, 175, 55),      -- brighter gold for signs
+	Glass       = Color3.fromRGB(140, 200, 230),     -- tinted glass (brighter for see-through)
+	GlassDark   = Color3.fromRGB(100, 160, 200),     -- slightly darker glass tint
+	Roof        = Color3.fromRGB(35, 30, 45),        -- dark roof
+	Steps       = Color3.fromRGB(130, 125, 115),     -- stone steps
+	Pillar      = Color3.fromRGB(160, 155, 145),     -- stone pillars
+	-- Interior
+	FloorTile   = Color3.fromRGB(60, 55, 70),        -- dark floor
+	FloorMarble = Color3.fromRGB(180, 175, 165),     -- marble floor (not pure white)
+	CarpetRed   = Color3.fromRGB(130, 15, 25),       -- carpet
+	FeltGreen   = Color3.fromRGB(20, 90, 40),        -- table felt
+	Bar         = Color3.fromRGB(70, 40, 12),         -- bar wood
+	BarTop      = Color3.fromRGB(170, 140, 45),       -- bar top (muted gold)
+	Stool       = Color3.fromRGB(120, 15, 25),        -- stool
+	Chandelier  = Color3.fromRGB(180, 150, 50),       -- chandelier (muted)
+	WallInt     = Color3.fromRGB(50, 45, 60),         -- dark interior walls
+	Column      = Color3.fromRGB(150, 145, 135),      -- interior columns
+	SignBg      = Color3.fromRGB(15, 10, 25),         -- sign background
+	-- Pedestal
+	PedestalGlow = Color3.fromRGB(200, 180, 70),     -- soft glow ring on floor
+}
+-- ============================================================================
+-- HELPER FUNCTIONS
+-- ============================================================================
+local function part(parent, props)
+	local p = Instance.new("Part")
+	p.Anchored = true
+	p.CanCollide = (props.CanCollide ~= nil) and props.CanCollide or true
+	p.CastShadow = true
+	p.TopSurface = Enum.SurfaceType.Smooth
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	p.Name = props.Name or "Part"
+	p.Size = props.Size or Vector3.new(1,1,1)
+	p.CFrame = props.CFrame or CFrame.new()
+	p.Color = props.Color or Color3.new(0.5, 0.5, 0.5)
+	p.Material = props.Material or Enum.Material.Concrete
+	p.Transparency = props.Transparency or 0
+	if props.Shape then p.Shape = props.Shape end
+	p.Parent = parent
+	return p
+end
+local function addPointLight(host, brightness, range, color)
+	local l = Instance.new("PointLight")
+	l.Brightness = brightness or 1
+	l.Range = range or 20
+	l.Color = color or Color3.fromRGB(255, 230, 190)
+	l.Shadows = true
+	l.Parent = host
+end
+--- Adds a SurfaceGui text label on the given face
+local function addSign(host, face, text, textColor, bgColor)
+	local sg = Instance.new("SurfaceGui")
+	sg.Face = face
+	sg.SizingMode = Enum.SurfaceGuiSizingMode.FixedSize
+	sg.CanvasSize = Vector2.new(1024, 256)
+	sg.AlwaysOnTop = false
+	sg.LightInfluence = 0       -- sign text glows on its own
+	sg.Brightness = 1
+	sg.Parent = host
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(1,0,1,0)
+	lbl.BackgroundColor3 = bgColor or C.SignBg
+	lbl.BackgroundTransparency = 0
+	lbl.Text = text
+	lbl.TextColor3 = textColor or C.GoldBright
+	lbl.Font = Enum.Font.GothamBold
+	lbl.TextScaled = true
+	lbl.Parent = sg
+end
+
+--- Build front wall with a wide open entrance in the center
+--- NOW: uses Glass material + transparency for see-through walls
+local function buildFrontWallWithOpening(model, centerX, Y0, W, H, wallZ, openW, openH, wallColor, wallMat)
+	-- Override to glass
+	wallMat = Enum.Material.Glass
+	local glassTransparency = 0.5
+	-- Left section of front wall
+	local leftW = (W - openW) / 2
+	if leftW > 0.5 then
+		part(model, {
+			Name = "FrontWallLeft",
+			Size = Vector3.new(leftW, H, 0.5),
+			CFrame = CFrame.new(centerX - openW/2 - leftW/2, Y0 + H/2, wallZ),
+			Color = C.Glass, Material = wallMat,
+			Transparency = glassTransparency,
+		})
+	end
+	-- Right section of front wall
+	local rightW = leftW
+	if rightW > 0.5 then
+		part(model, {
+			Name = "FrontWallRight",
+			Size = Vector3.new(rightW, H, 0.5),
+			CFrame = CFrame.new(centerX + openW/2 + rightW/2, Y0 + H/2, wallZ),
+			Color = C.Glass, Material = wallMat,
+			Transparency = glassTransparency,
+		})
+	end
+	-- Header above opening
+	local headerH = H - openH
+	if headerH > 0.5 then
+		part(model, {
+			Name = "FrontWallHeader",
+			Size = Vector3.new(openW, headerH, 0.5),
+			CFrame = CFrame.new(centerX, Y0 + openH + headerH/2, wallZ),
+			Color = C.Glass, Material = wallMat,
+			Transparency = glassTransparency,
+		})
+	end
+end
+
+-- ============================================================================
+-- BRAINROT PEDESTAL HELPER (UPDATED — floor-level spots)
+-- Creates simple floor-level pedestal spots inside a casino model.
+-- Each pedestal = a flat glowing ring on the floor + invisible anchor above it
+-- Inspired by "steal a brainrot" style display spots
+-- ============================================================================
+local function addBrainrotPedestals(model, cx, Y0, cz, W, D, count)
+	local positions = {}
+
+	if count <= 4 then
+		-- Place along left wall
+		local wallX = cx - W/2 + 3
+		local startZ = cz - D/2 + 5
+		local endZ   = cz + D/2 - 8  -- stay away from bar area at back
+		local spacing = (endZ - startZ) / math.max(count - 1, 1)
+		for i = 1, count do
+			table.insert(positions, {
+				x = wallX,
+				z = startZ + (i - 1) * spacing,
+			})
+		end
+	elseif count <= 6 then
+		-- 3 along left wall, rest along right wall
+		local leftX  = cx - W/2 + 3
+		local rightX = cx + W/2 - 3
+		local startZ = cz - D/2 + 5
+		local endZ   = cz + D/2 - 8
+		local leftCount = 3
+		local leftSpacing = (endZ - startZ) / math.max(leftCount - 1, 1)
+		for i = 1, leftCount do
+			table.insert(positions, {
+				x = leftX,
+				z = startZ + (i - 1) * leftSpacing,
+			})
+		end
+		local rightCount = count - leftCount
+		local rightSpacing = (endZ - startZ) / math.max(rightCount - 1, 1)
+		for i = 1, rightCount do
+			table.insert(positions, {
+				x = rightX,
+				z = startZ + (i - 1) * rightSpacing,
+			})
+		end
+	else
+		-- 5 along left wall, 5 along right wall
+		local leftX  = cx - W/2 + 3
+		local rightX = cx + W/2 - 3
+		local startZ = cz - D/2 + 5
+		local endZ   = cz + D/2 - 8
+		local perSide = math.ceil(count / 2)
+		local leftSpacing = (endZ - startZ) / math.max(perSide - 1, 1)
+		for i = 1, perSide do
+			table.insert(positions, {
+				x = leftX,
+				z = startZ + (i - 1) * leftSpacing,
+			})
+		end
+		local rightCount = count - perSide
+		local rightSpacing = (endZ - startZ) / math.max(rightCount - 1, 1)
+		for i = 1, rightCount do
+			table.insert(positions, {
+				x = rightX,
+				z = startZ + (i - 1) * rightSpacing,
+			})
+		end
+	end
+
+	-- Create clean solid pedestal platforms (no glow, no neon)
+	for i, pos in ipairs(positions) do
+		-- Solid platform
+		part(model, {
+			Name = "PedestalBase_" .. i,
+			Size = Vector3.new(4, 0.5, 4),
+			CFrame = CFrame.new(pos.x, Y0 + 0.25, pos.z),
+			Color = Color3.fromRGB(60, 60, 70),
+			Material = Enum.Material.SmoothPlastic,
+		})
+		-- Lighter top surface
+		part(model, {
+			Name = "PedestalTop_" .. i,
+			Size = Vector3.new(3.8, 0.08, 3.8),
+			CFrame = CFrame.new(pos.x, Y0 + 0.51, pos.z),
+			Color = Color3.fromRGB(90, 90, 100),
+			Material = Enum.Material.SmoothPlastic,
+		})
+		-- Invisible anchor just above surface (BrainrotService uses this)
+		local anchor = part(model, {
+			Name = "BrainrotPedestal_" .. i,
+			Size = Vector3.new(2, 0.1, 2),
+			CFrame = CFrame.new(pos.x, Y0 + 0.6, pos.z),
+			Color = Color3.new(1, 1, 1),
+			Transparency = 1,
+			CanCollide = false,
+		})
+		anchor.CanCollide = false
+	end
+
+	-- Store casino center coordinates as attributes for BrainrotService tile positioning
+	model:SetAttribute("CasinoCenterX", cx)
+	model:SetAttribute("CasinoCenterZ", cz)
+end
+
+-- ============================================================================
+-- GLASS WALL HELPER
+-- Creates a glass wall (used for back and side walls)
+-- ============================================================================
+local GLASS_TRANSPARENCY = 0.5
+
+-- ============================================================================
+-- LEVEL 1: SMALL (~20x20 footprint)
+-- Simple glass box, wide open entrance, sign above door
+-- ============================================================================
+local function buildSmall(lotPart, playerName)
+	local model = Instance.new("Model")
+	model.Name = playerName .. "_Casino"
+	local lotCF = lotPart.CFrame
+	local lotSize = lotPart.Size
+	local lotX = lotCF.Position.X
+	local lotZ = lotCF.Position.Z
+	local Y0 = lotCF.Position.Y + lotSize.Y / 2
+	local W, D, H = 20, 20, 10
+	local cx, cz = lotX, lotZ
+	local frontZ = cz - D/2   -- front wall Z
+	-- Floor
+	local floor = part(model, {
+		Name = "Floor",
+		Size = Vector3.new(W, 0.4, D),
+		CFrame = CFrame.new(cx, Y0, cz),
+		Color = C.FloorTile,
+		Material = Enum.Material.Concrete,
+	})
+	model.PrimaryPart = floor
+	-- Back wall (GLASS)
+	part(model, {
+		Name = "WallBack",
+		Size = Vector3.new(W, H, 0.5),
+		CFrame = CFrame.new(cx, Y0 + H/2, cz + D/2),
+		Color = C.Glass, Material = Enum.Material.Glass,
+		Transparency = GLASS_TRANSPARENCY,
+	})
+	-- Side walls (GLASS)
+	part(model, {
+		Name = "WallLeft",
+		Size = Vector3.new(0.5, H, D),
+		CFrame = CFrame.new(cx - W/2, Y0 + H/2, cz),
+		Color = C.Glass, Material = Enum.Material.Glass,
+		Transparency = GLASS_TRANSPARENCY,
+	})
+	part(model, {
+		Name = "WallRight",
+		Size = Vector3.new(0.5, H, D),
+		CFrame = CFrame.new(cx + W/2, Y0 + H/2, cz),
+		Color = C.Glass, Material = Enum.Material.Glass,
+		Transparency = GLASS_TRANSPARENCY,
+	})
+	-- Front wall with wide open entrance (8 studs wide, 7 tall) — also glass
+	buildFrontWallWithOpening(model, cx, Y0, W, H, frontZ, 8, 7, C.Glass, Enum.Material.Glass)
+	-- Roof
+	part(model, {
+		Name = "Roof",
+		Size = Vector3.new(W + 1, 0.5, D + 1),
+		CFrame = CFrame.new(cx, Y0 + H, cz),
+		Color = C.Roof, Material = Enum.Material.Slate,
+	})
+	-- Sign above entrance (on front face)
+	local sign = part(model, {
+		Name = "Sign",
+		Size = Vector3.new(10, 2, 0.3),
+		CFrame = CFrame.new(cx, Y0 + H - 1.5, frontZ - 0.2),
+		Color = C.SignBg,
+	})
+	-- Sign faces -Z (toward player approaching), that's NormalId.Front
+	addSign(sign, Enum.NormalId.Front, playerName .. "'s Casino", C.GoldBright, C.SignBg)
+	-- Gold trim around entrance
+	-- Left pillar
+	part(model, {
+		Name = "EntranceTrimL",
+		Size = Vector3.new(0.4, 7, 0.6),
+		CFrame = CFrame.new(cx - 4.2, Y0 + 3.5, frontZ - 0.1),
+		Color = C.Gold,
+	})
+	-- Right pillar
+	part(model, {
+		Name = "EntranceTrimR",
+		Size = Vector3.new(0.4, 7, 0.6),
+		CFrame = CFrame.new(cx + 4.2, Y0 + 3.5, frontZ - 0.1),
+		Color = C.Gold,
+	})
+	-- Top trim
+	part(model, {
+		Name = "EntranceTrimTop",
+		Size = Vector3.new(8.8, 0.4, 0.6),
+		CFrame = CFrame.new(cx, Y0 + 7.2, frontZ - 0.1),
+		Color = C.Gold,
+	})
+	-- Gold frame strips along glass edges (looks clean like steal a brainrot)
+	-- Bottom trim all around
+	part(model, {
+		Name = "BottomTrimBack",
+		Size = Vector3.new(W, 0.3, 0.6),
+		CFrame = CFrame.new(cx, Y0 + 0.15, cz + D/2),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	part(model, {
+		Name = "BottomTrimLeft",
+		Size = Vector3.new(0.6, 0.3, D),
+		CFrame = CFrame.new(cx - W/2, Y0 + 0.15, cz),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	part(model, {
+		Name = "BottomTrimRight",
+		Size = Vector3.new(0.6, 0.3, D),
+		CFrame = CFrame.new(cx + W/2, Y0 + 0.15, cz),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	-- Top trim all around
+	part(model, {
+		Name = "TopTrimBack",
+		Size = Vector3.new(W, 0.3, 0.6),
+		CFrame = CFrame.new(cx, Y0 + H - 0.15, cz + D/2),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	part(model, {
+		Name = "TopTrimLeft",
+		Size = Vector3.new(0.6, 0.3, D),
+		CFrame = CFrame.new(cx - W/2, Y0 + H - 0.15, cz),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	part(model, {
+		Name = "TopTrimRight",
+		Size = Vector3.new(0.6, 0.3, D),
+		CFrame = CFrame.new(cx + W/2, Y0 + H - 0.15, cz),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	-- Interior light (soft)
+	local lightHost = part(model, {
+		Name = "LightFixture",
+		Size = Vector3.new(1, 0.3, 1),
+		CFrame = CFrame.new(cx, Y0 + H - 1, cz),
+		Color = C.Chandelier, Transparency = 0,
+	})
+	addPointLight(lightHost, 1.2, 22, Color3.fromRGB(255, 230, 190))
+
+	-- ══ Brainrot pedestals (2 floor spots for Small) ══
+	addBrainrotPedestals(model, cx, Y0, cz, W, D, 2)
+
+	model.Parent = workspace
+	return model
+end
+-- ============================================================================
+-- LEVEL 2: MEDIUM (~30x30 footprint)
+-- Glass walls, gold frame trim, bar area, wider entrance
+-- ============================================================================
+local function buildMedium(lotPart, playerName)
+	local model = Instance.new("Model")
+	model.Name = playerName .. "_Casino"
+	local lotCF = lotPart.CFrame
+	local lotSize = lotPart.Size
+	local lotX = lotCF.Position.X
+	local lotZ = lotCF.Position.Z
+	local Y0 = lotCF.Position.Y + lotSize.Y / 2
+	local W, D, H = 30, 30, 12
+	local cx, cz = lotX, lotZ
+	local frontZ = cz - D/2
+	-- Floor
+	local floor = part(model, {
+		Name = "Floor",
+		Size = Vector3.new(W, 0.5, D),
+		CFrame = CFrame.new(cx, Y0, cz),
+		Color = C.FloorMarble, Material = Enum.Material.Marble,
+	})
+	model.PrimaryPart = floor
+	-- Back wall (GLASS)
+	part(model, {
+		Name = "WallBack",
+		Size = Vector3.new(W, H, 0.5),
+		CFrame = CFrame.new(cx, Y0 + H/2, cz + D/2),
+		Color = C.Glass, Material = Enum.Material.Glass,
+		Transparency = GLASS_TRANSPARENCY,
+	})
+	-- Side walls (GLASS)
+	part(model, {
+		Name = "WallLeft",
+		Size = Vector3.new(0.5, H, D),
+		CFrame = CFrame.new(cx - W/2, Y0 + H/2, cz),
+		Color = C.Glass, Material = Enum.Material.Glass,
+		Transparency = GLASS_TRANSPARENCY,
+	})
+	part(model, {
+		Name = "WallRight",
+		Size = Vector3.new(0.5, H, D),
+		CFrame = CFrame.new(cx + W/2, Y0 + H/2, cz),
+		Color = C.Glass, Material = Enum.Material.Glass,
+		Transparency = GLASS_TRANSPARENCY,
+	})
+	-- Front wall with wide open entrance (10 wide, 8 tall) — glass
+	buildFrontWallWithOpening(model, cx, Y0, W, H, frontZ, 10, 8, C.Glass, Enum.Material.Glass)
+	-- Roof
+	part(model, {
+		Name = "Roof",
+		Size = Vector3.new(W + 1, 0.5, D + 1),
+		CFrame = CFrame.new(cx, Y0 + H, cz),
+		Color = C.Roof, Material = Enum.Material.Slate,
+	})
+	-- Gold frame trim along all edges (clean glass-box look)
+	-- Vertical corner strips
+	for _, corner in ipairs({
+		{x = cx - W/2, z = cz - D/2},
+		{x = cx - W/2, z = cz + D/2},
+		{x = cx + W/2, z = cz - D/2},
+		{x = cx + W/2, z = cz + D/2},
+	}) do
+		part(model, {
+			Name = "CornerTrim",
+			Size = Vector3.new(0.6, H, 0.6),
+			CFrame = CFrame.new(corner.x, Y0 + H/2, corner.z),
+			Color = C.Gold, Material = Enum.Material.Metal,
+		})
+	end
+	-- Bottom trim
+	part(model, {
+		Name = "BottomTrimBack",
+		Size = Vector3.new(W, 0.3, 0.6),
+		CFrame = CFrame.new(cx, Y0 + 0.15, cz + D/2),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	part(model, {
+		Name = "BottomTrimLeft",
+		Size = Vector3.new(0.6, 0.3, D),
+		CFrame = CFrame.new(cx - W/2, Y0 + 0.15, cz),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	part(model, {
+		Name = "BottomTrimRight",
+		Size = Vector3.new(0.6, 0.3, D),
+		CFrame = CFrame.new(cx + W/2, Y0 + 0.15, cz),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	-- Top trim
+	part(model, {
+		Name = "TopTrimBack",
+		Size = Vector3.new(W, 0.3, 0.6),
+		CFrame = CFrame.new(cx, Y0 + H - 0.15, cz + D/2),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	part(model, {
+		Name = "TopTrimLeft",
+		Size = Vector3.new(0.6, 0.3, D),
+		CFrame = CFrame.new(cx - W/2, Y0 + H - 0.15, cz),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	part(model, {
+		Name = "TopTrimRight",
+		Size = Vector3.new(0.6, 0.3, D),
+		CFrame = CFrame.new(cx + W/2, Y0 + H - 0.15, cz),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	-- Entrance steps
+	part(model, {
+		Name = "Step1",
+		Size = Vector3.new(12, 0.5, 2),
+		CFrame = CFrame.new(cx, Y0 - 0.5, frontZ - 2),
+		Color = C.Steps, Material = Enum.Material.Concrete,
+	})
+	part(model, {
+		Name = "Step2",
+		Size = Vector3.new(10, 0.5, 2),
+		CFrame = CFrame.new(cx, Y0 - 0.0, frontZ - 4),
+		Color = C.Steps, Material = Enum.Material.Concrete,
+	})
+	-- Sign on front
+	local sign = part(model, {
+		Name = "Sign",
+		Size = Vector3.new(12, 2.5, 0.3),
+		CFrame = CFrame.new(cx, Y0 + H - 2, frontZ - 0.3),
+		Color = C.SignBg,
+	})
+	addSign(sign, Enum.NormalId.Front, playerName .. "'s Casino", C.GoldBright, C.SignBg)
+	-- Entrance pillars
+	for x = -1, 1, 2 do
+		part(model, {
+			Name = "EntrancePillar_" .. x,
+			Size = Vector3.new(1.5, 8, 1.5),
+			CFrame = CFrame.new(cx + (x * 5.5), Y0 + 4, frontZ - 0.5),
+			Color = C.Pillar, Material = Enum.Material.Concrete,
+		})
+	end
+	-- Gold trim on entrance pillars
+	for x = -1, 1, 2 do
+		part(model, {
+			Name = "PillarCap_" .. x,
+			Size = Vector3.new(2, 0.4, 2),
+			CFrame = CFrame.new(cx + (x * 5.5), Y0 + 8.2, frontZ - 0.5),
+			Color = C.Gold,
+		})
+	end
+	-- Interior: carpet runner
+	part(model, {
+		Name = "CarpetRunner",
+		Size = Vector3.new(5, 0.05, 14),
+		CFrame = CFrame.new(cx, Y0 + 0.25, cz + 2),
+		Color = C.CarpetRed, Material = Enum.Material.Fabric,
+	})
+	-- Bar counter along back wall
+	part(model, {
+		Name = "BarCounter",
+		Size = Vector3.new(14, 1.2, 2),
+		CFrame = CFrame.new(cx, Y0 + 0.6, cz + D/2 - 2),
+		Color = C.Bar, Material = Enum.Material.Wood,
+	})
+	part(model, {
+		Name = "BarTop",
+		Size = Vector3.new(14.3, 0.15, 2.3),
+		CFrame = CFrame.new(cx, Y0 + 1.8, cz + D/2 - 2),
+		Color = C.BarTop,
+	})
+	-- Ceiling lights (soft)
+	for i = -1, 1 do
+		local lightX = cx + (i * 10)
+		local lightHost = part(model, {
+			Name = "Light_" .. i,
+			Size = Vector3.new(1.2, 0.4, 1.2),
+			CFrame = CFrame.new(lightX, Y0 + H - 1.5, cz),
+			Color = C.Chandelier,
+		})
+		addPointLight(lightHost, 1.5, 28, Color3.fromRGB(255, 230, 190))
+	end
+
+	-- ══ Brainrot pedestals (4 floor spots for Medium) ══
+	addBrainrotPedestals(model, cx, Y0, cz, W, D, 4)
+
+	model.Parent = workspace
+	return model
+end
+-- ============================================================================
+-- LEVEL 3: LARGE (~40x40, 2 stories)
+-- Gold trim, chandeliers, VIP upper floor, grand glass entrance
+-- ============================================================================
+local function buildLarge(lotPart, playerName)
+	local model = Instance.new("Model")
+	model.Name = playerName .. "_Casino"
+	local lotCF = lotPart.CFrame
+	local lotSize = lotPart.Size
+	local lotX = lotCF.Position.X
+	local lotZ = lotCF.Position.Z
+	local Y0 = lotCF.Position.Y + lotSize.Y / 2
+	local W, D = 40, 40
+	local H1 = 12  -- ground floor
+	local H2 = 10  -- upper floor
+	local cx, cz = lotX, lotZ
+	local frontZ = cz - D/2
+	-- Ground floor
+	local floor = part(model, {
+		Name = "LobbyFloor",
+		Size = Vector3.new(W, 0.6, D),
+		CFrame = CFrame.new(cx, Y0, cz),
+		Color = C.FloorMarble, Material = Enum.Material.Marble,
+	})
+	model.PrimaryPart = floor
+	-- Back wall (GLASS)
+	part(model, {
+		Name = "WallBack",
+		Size = Vector3.new(W, H1, 0.6),
+		CFrame = CFrame.new(cx, Y0 + H1/2, cz + D/2),
+		Color = C.Glass, Material = Enum.Material.Glass,
+		Transparency = GLASS_TRANSPARENCY,
+	})
+	-- Side walls (GLASS)
+	part(model, {
+		Name = "WallLeft",
+		Size = Vector3.new(0.6, H1, D),
+		CFrame = CFrame.new(cx - W/2, Y0 + H1/2, cz),
+		Color = C.Glass, Material = Enum.Material.Glass,
+		Transparency = GLASS_TRANSPARENCY,
+	})
+	part(model, {
+		Name = "WallRight",
+		Size = Vector3.new(0.6, H1, D),
+		CFrame = CFrame.new(cx + W/2, Y0 + H1/2, cz),
+		Color = C.Glass, Material = Enum.Material.Glass,
+		Transparency = GLASS_TRANSPARENCY,
+	})
+	-- Front wall with grand opening (14 wide, 9 tall) — glass
+	buildFrontWallWithOpening(model, cx, Y0, W, H1, frontZ, 14, 9, C.Glass, Enum.Material.Glass)
+	-- Gold corner trim (vertical pillars at each corner)
+	for x = -1, 1, 2 do
+		for z = -1, 1, 2 do
+			part(model, {
+				Name = "GoldTrim",
+				Size = Vector3.new(1.2, H1, 1.2),
+				CFrame = CFrame.new(cx + (x * W/2), Y0 + H1/2, cz + (z * D/2)),
+				Color = C.Gold, Material = Enum.Material.Metal,
+			})
+		end
+	end
+	-- Bottom gold trim
+	part(model, {
+		Name = "BottomTrimBack",
+		Size = Vector3.new(W, 0.4, 0.7),
+		CFrame = CFrame.new(cx, Y0 + 0.2, cz + D/2),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	part(model, {
+		Name = "BottomTrimLeft",
+		Size = Vector3.new(0.7, 0.4, D),
+		CFrame = CFrame.new(cx - W/2, Y0 + 0.2, cz),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	part(model, {
+		Name = "BottomTrimRight",
+		Size = Vector3.new(0.7, 0.4, D),
+		CFrame = CFrame.new(cx + W/2, Y0 + 0.2, cz),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	-- Top gold trim
+	part(model, {
+		Name = "TopTrimBack",
+		Size = Vector3.new(W, 0.4, 0.7),
+		CFrame = CFrame.new(cx, Y0 + H1 - 0.2, cz + D/2),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	part(model, {
+		Name = "TopTrimLeft",
+		Size = Vector3.new(0.7, 0.4, D),
+		CFrame = CFrame.new(cx - W/2, Y0 + H1 - 0.2, cz),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	part(model, {
+		Name = "TopTrimRight",
+		Size = Vector3.new(0.7, 0.4, D),
+		CFrame = CFrame.new(cx + W/2, Y0 + H1 - 0.2, cz),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	-- Lobby roof / upper floor platform
+	part(model, {
+		Name = "LobbyRoof",
+		Size = Vector3.new(W, 0.6, D),
+		CFrame = CFrame.new(cx, Y0 + H1, cz),
+		Color = C.Roof, Material = Enum.Material.Slate,
+	})
+	-- Upper floor (set back slightly)
+	part(model, {
+		Name = "UpperFloor",
+		Size = Vector3.new(W - 4, 0.6, D - 4),
+		CFrame = CFrame.new(cx, Y0 + H1, cz),
+		Color = C.FloorMarble, Material = Enum.Material.Marble,
+	})
+	-- Upper floor walls (glass VIP area)
+	part(model, {
+		Name = "UpperWallFront",
+		Size = Vector3.new(W - 4, H2, 0.5),
+		CFrame = CFrame.new(cx, Y0 + H1 + H2/2, cz - (D-4)/2),
+		Color = C.GlassDark, Material = Enum.Material.Glass,
+		Transparency = 0.4,
+	})
+	part(model, {
+		Name = "UpperWallBack",
+		Size = Vector3.new(W - 4, H2, 0.5),
+		CFrame = CFrame.new(cx, Y0 + H1 + H2/2, cz + (D-4)/2),
+		Color = C.GlassDark, Material = Enum.Material.Glass,
+		Transparency = 0.4,
+	})
+	part(model, {
+		Name = "UpperWallLeft",
+		Size = Vector3.new(0.5, H2, D - 4),
+		CFrame = CFrame.new(cx - (W-4)/2, Y0 + H1 + H2/2, cz),
+		Color = C.GlassDark, Material = Enum.Material.Glass,
+		Transparency = 0.4,
+	})
+	part(model, {
+		Name = "UpperWallRight",
+		Size = Vector3.new(0.5, H2, D - 4),
+		CFrame = CFrame.new(cx + (W-4)/2, Y0 + H1 + H2/2, cz),
+		Color = C.GlassDark, Material = Enum.Material.Glass,
+		Transparency = 0.4,
+	})
+	-- Upper roof
+	part(model, {
+		Name = "UpperRoof",
+		Size = Vector3.new(W - 4, 0.6, D - 4),
+		CFrame = CFrame.new(cx, Y0 + H1 + H2, cz),
+		Color = C.Roof, Material = Enum.Material.Slate,
+	})
+	-- Grand entrance steps (3 tiers)
+	part(model, {
+		Name = "Step1",
+		Size = Vector3.new(16, 0.6, 3),
+		CFrame = CFrame.new(cx, Y0 - 0.9, frontZ - 3),
+		Color = C.Steps, Material = Enum.Material.Concrete,
+	})
+	part(model, {
+		Name = "Step2",
+		Size = Vector3.new(14, 0.6, 2),
+		CFrame = CFrame.new(cx, Y0 - 0.3, frontZ - 5.5),
+		Color = C.Steps, Material = Enum.Material.Concrete,
+	})
+	-- Entrance pillars
+	for x = -1, 1, 2 do
+		part(model, {
+			Name = "EntrancePillar_" .. x,
+			Size = Vector3.new(2.5, 9, 2.5),
+			CFrame = CFrame.new(cx + (x * 8), Y0 + 4.5, frontZ - 0.5),
+			Color = C.Pillar, Material = Enum.Material.Concrete,
+		})
+		-- Gold cap
+		part(model, {
+			Name = "PillarCap_" .. x,
+			Size = Vector3.new(3, 0.5, 3),
+			CFrame = CFrame.new(cx + (x * 8), Y0 + 9.2, frontZ - 0.5),
+			Color = C.Gold,
+		})
+	end
+	-- Awning over entrance
+	part(model, {
+		Name = "Awning",
+		Size = Vector3.new(18, 0.8, 4),
+		CFrame = CFrame.new(cx, Y0 + 9.5, frontZ - 2),
+		Color = C.Trim,
+	})
+	-- Front sign (above entrance)
+	local sign = part(model, {
+		Name = "Sign",
+		Size = Vector3.new(14, 3, 0.4),
+		CFrame = CFrame.new(cx, Y0 + H1 - 2, frontZ - 0.4),
+		Color = C.SignBg,
+	})
+	addSign(sign, Enum.NormalId.Front, playerName .. "'s Casino", C.GoldBright, C.SignBg)
+	-- Interior: red carpet
+	part(model, {
+		Name = "Carpet",
+		Size = Vector3.new(W - 8, 0.08, D - 8),
+		CFrame = CFrame.new(cx, Y0 + 0.3, cz),
+		Color = C.CarpetRed, Material = Enum.Material.Fabric,
+	})
+	-- Bar counter along back wall
+	part(model, {
+		Name = "BarCounter",
+		Size = Vector3.new(16, 1.5, 2.5),
+		CFrame = CFrame.new(cx, Y0 + 0.75, cz + D/2 - 3),
+		Color = C.Bar, Material = Enum.Material.Wood,
+	})
+	part(model, {
+		Name = "BarTop",
+		Size = Vector3.new(16.5, 0.15, 2.8),
+		CFrame = CFrame.new(cx, Y0 + 2.3, cz + D/2 - 3),
+		Color = C.BarTop,
+	})
+	-- Grand chandelier
+	local chandelier = part(model, {
+		Name = "Chandelier",
+		Size = Vector3.new(4, 0.5, 4),
+		CFrame = CFrame.new(cx, Y0 + H1 - 2, cz),
+		Color = C.Chandelier,
+	})
+	addPointLight(chandelier, 2, 40, Color3.fromRGB(255, 230, 190))
+	-- Side lights (soft)
+	for i = -2, 2, 2 do
+		if i ~= 0 then
+			local lightHost = part(model, {
+				Name = "CeilingLight",
+				Size = Vector3.new(1, 0.3, 1),
+				CFrame = CFrame.new(cx + (i * 8), Y0 + H1 - 1, cz),
+				Color = C.Chandelier,
+			})
+			addPointLight(lightHost, 1.2, 25, Color3.fromRGB(255, 230, 190))
+		end
+	end
+
+	-- ══ Brainrot pedestals (6 floor spots for Large) ══
+	addBrainrotPedestals(model, cx, Y0, cz, W, D, 6)
+
+	model.Parent = workspace
+	return model
+end
+-- ============================================================================
+-- LEVEL 4: MEGA (~50x50, 3 stories)
+-- Grand glass palace, marble, full bar, chandeliers, VIP
+-- ============================================================================
+local function buildMega(lotPart, playerName)
+	local model = Instance.new("Model")
+	model.Name = playerName .. "_Casino"
+	local lotCF = lotPart.CFrame
+	local lotSize = lotPart.Size
+	local lotX = lotCF.Position.X
+	local lotZ = lotCF.Position.Z
+	local Y0 = lotCF.Position.Y + lotSize.Y / 2
+	local W, D = 50, 50
+	local H1, H2, H3 = 14, 10, 3
+	local cx, cz = lotX, lotZ
+	local frontZ = cz - D/2
+	-- Lobby floor
+	local floor = part(model, {
+		Name = "LobbyFloor",
+		Size = Vector3.new(W, 0.8, D),
+		CFrame = CFrame.new(cx, Y0, cz),
+		Color = C.FloorMarble, Material = Enum.Material.Marble,
+	})
+	model.PrimaryPart = floor
+	-- Lobby walls (GLASS)
+	part(model, {
+		Name = "WallBack",
+		Size = Vector3.new(W, H1, 0.8),
+		CFrame = CFrame.new(cx, Y0 + H1/2, cz + D/2),
+		Color = C.Glass, Material = Enum.Material.Glass,
+		Transparency = GLASS_TRANSPARENCY,
+	})
+	part(model, {
+		Name = "WallLeft",
+		Size = Vector3.new(0.8, H1, D),
+		CFrame = CFrame.new(cx - W/2, Y0 + H1/2, cz),
+		Color = C.Glass, Material = Enum.Material.Glass,
+		Transparency = GLASS_TRANSPARENCY,
+	})
+	part(model, {
+		Name = "WallRight",
+		Size = Vector3.new(0.8, H1, D),
+		CFrame = CFrame.new(cx + W/2, Y0 + H1/2, cz),
+		Color = C.Glass, Material = Enum.Material.Glass,
+		Transparency = GLASS_TRANSPARENCY,
+	})
+	-- Front wall with grand opening (18 wide, 10 tall) — glass
+	buildFrontWallWithOpening(model, cx, Y0, W, H1, frontZ, 18, 10, C.Glass, Enum.Material.Glass)
+	-- Decorative facade pillars (side pillars only, front kept clean for sign)
+	local pillarPositions = {
+		{x = cx - W/2 - 1, z = cz - 15},
+		{x = cx - W/2 - 1, z = cz + 15},
+		{x = cx + W/2 + 1, z = cz - 15},
+		{x = cx + W/2 + 1, z = cz + 15},
+	}
+	for _, pos in ipairs(pillarPositions) do
+		part(model, {
+			Name = "FacadePillar",
+			Size = Vector3.new(2.5, H1 - 1, 2.5),
+			CFrame = CFrame.new(pos.x, Y0 + (H1-1)/2, pos.z),
+			Color = C.Pillar, Material = Enum.Material.Concrete,
+		})
+	end
+	-- Gold corner trim
+	for x = -1, 1, 2 do
+		for z = -1, 1, 2 do
+			part(model, {
+				Name = "GoldCorner",
+				Size = Vector3.new(1.5, H1, 1.5),
+				CFrame = CFrame.new(cx + (x * W/2), Y0 + H1/2, cz + (z * D/2)),
+				Color = C.Gold, Material = Enum.Material.Metal,
+			})
+		end
+	end
+	-- Bottom gold trim
+	part(model, {
+		Name = "BottomTrimBack",
+		Size = Vector3.new(W, 0.5, 0.9),
+		CFrame = CFrame.new(cx, Y0 + 0.25, cz + D/2),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	part(model, {
+		Name = "BottomTrimLeft",
+		Size = Vector3.new(0.9, 0.5, D),
+		CFrame = CFrame.new(cx - W/2, Y0 + 0.25, cz),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	part(model, {
+		Name = "BottomTrimRight",
+		Size = Vector3.new(0.9, 0.5, D),
+		CFrame = CFrame.new(cx + W/2, Y0 + 0.25, cz),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	-- Top gold trim
+	part(model, {
+		Name = "TopTrimBack",
+		Size = Vector3.new(W, 0.5, 0.9),
+		CFrame = CFrame.new(cx, Y0 + H1 - 0.25, cz + D/2),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	part(model, {
+		Name = "TopTrimLeft",
+		Size = Vector3.new(0.9, 0.5, D),
+		CFrame = CFrame.new(cx - W/2, Y0 + H1 - 0.25, cz),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	part(model, {
+		Name = "TopTrimRight",
+		Size = Vector3.new(0.9, 0.5, D),
+		CFrame = CFrame.new(cx + W/2, Y0 + H1 - 0.25, cz),
+		Color = C.Gold, Material = Enum.Material.Metal,
+	})
+	-- ── Roof + Upper floor with ladder hole ──
+	-- Hole bounds (ladder at cx+10, inside upper floor)
+	local holeXMin, holeXMax = cx + 6, cx + 14
+	local holeZMin, holeZMax = cz + 16, cz + 22
+
+	-- MainRoof: ONLY the outer ledge border (avoids Z-fighting with UpperFloor)
+	-- The upper floor is 44x44, the roof is 52x52, so 4-stud border on each side
+	local roofXMin, roofXMax = cx - (W+2)/2, cx + (W+2)/2   -- -26 to +26
+	local roofZMin, roofZMax = cz - (D+2)/2, cz + (D+2)/2
+	local ufXMin, ufXMax = cx - (W-6)/2, cx + (W-6)/2       -- -22 to +22
+	local ufZMin, ufZMax = cz - (D-6)/2, cz + (D-6)/2
+	local border = (roofXMax - ufXMax)  -- 4 studs
+	-- Front border strip
+	part(model, {
+		Name = "MainRoof_Front",
+		Size = Vector3.new(W + 2, 0.8, border),
+		CFrame = CFrame.new(cx, Y0 + H1, roofZMin + border/2),
+		Color = C.Roof, Material = Enum.Material.Slate,
+	})
+	-- Left border strip
+	part(model, {
+		Name = "MainRoof_Left",
+		Size = Vector3.new(border, 0.8, W - 6),
+		CFrame = CFrame.new(roofXMin + border/2, Y0 + H1, cz),
+		Color = C.Roof, Material = Enum.Material.Slate,
+	})
+	-- Right border strip
+	part(model, {
+		Name = "MainRoof_Right",
+		Size = Vector3.new(border, 0.8, W - 6),
+		CFrame = CFrame.new(roofXMax - border/2, Y0 + H1, cz),
+		Color = C.Roof, Material = Enum.Material.Slate,
+	})
+	-- Back border strip (split for ladder hole: hole X is cx+6 to cx+14)
+	local backBorderZ = roofZMax - border/2   -- center of back border
+	-- Back-left portion
+	local bbLeftW = holeXMin - roofXMin
+	part(model, {
+		Name = "MainRoof_BackLeft",
+		Size = Vector3.new(bbLeftW, 0.8, border),
+		CFrame = CFrame.new(roofXMin + bbLeftW/2, Y0 + H1, backBorderZ),
+		Color = C.Roof, Material = Enum.Material.Slate,
+	})
+	-- Back-right portion
+	local bbRightW = roofXMax - holeXMax
+	part(model, {
+		Name = "MainRoof_BackRight",
+		Size = Vector3.new(bbRightW, 0.8, border),
+		CFrame = CFrame.new(holeXMax + bbRightW/2, Y0 + H1, backBorderZ),
+		Color = C.Roof, Material = Enum.Material.Slate,
+	})
+
+	-- UpperFloor (44x44 marble) split into 3 pieces with ladder hole
+	-- Front section (full width, up to hole)
+	local ufF = holeZMin - ufZMin
+	part(model, {
+		Name = "UpperFloor_Front",
+		Size = Vector3.new(W - 6, 0.8, ufF),
+		CFrame = CFrame.new(cx, Y0 + H1, ufZMin + ufF/2),
+		Color = C.FloorMarble, Material = Enum.Material.Marble,
+	})
+	-- Back-left of upper floor
+	local ufBlW = holeXMin - ufXMin
+	local ufBkD = ufZMax - holeZMin
+	if ufBlW > 0 and ufBkD > 0 then
+		part(model, {
+			Name = "UpperFloor_BackLeft",
+			Size = Vector3.new(ufBlW, 0.8, ufBkD),
+			CFrame = CFrame.new(ufXMin + ufBlW/2, Y0 + H1, holeZMin + ufBkD/2),
+			Color = C.FloorMarble, Material = Enum.Material.Marble,
+		})
+	end
+	-- Back-right of upper floor
+	local ufBrW = ufXMax - holeXMax
+	if ufBrW > 0 and ufBkD > 0 then
+		part(model, {
+			Name = "UpperFloor_BackRight",
+			Size = Vector3.new(ufBrW, 0.8, ufBkD),
+			CFrame = CFrame.new(holeXMax + ufBrW/2, Y0 + H1, holeZMin + ufBkD/2),
+			Color = C.FloorMarble, Material = Enum.Material.Marble,
+		})
+	end
+	-- Upper walls (glass VIP)
+	part(model, {
+		Name = "UpperWallFront",
+		Size = Vector3.new(W - 6, H2, 0.6),
+		CFrame = CFrame.new(cx, Y0 + H1 + H2/2, cz - (D-6)/2),
+		Color = C.GlassDark, Material = Enum.Material.Glass,
+		Transparency = 0.4,
+	})
+	part(model, {
+		Name = "UpperWallBack",
+		Size = Vector3.new(W - 6, H2, 0.6),
+		CFrame = CFrame.new(cx, Y0 + H1 + H2/2, cz + (D-6)/2),
+		Color = C.GlassDark, Material = Enum.Material.Glass,
+		Transparency = 0.4,
+	})
+	part(model, {
+		Name = "UpperWallLeft",
+		Size = Vector3.new(0.6, H2, D - 6),
+		CFrame = CFrame.new(cx - (W-6)/2, Y0 + H1 + H2/2, cz),
+		Color = C.GlassDark, Material = Enum.Material.Glass,
+		Transparency = 0.4,
+	})
+	part(model, {
+		Name = "UpperWallRight",
+		Size = Vector3.new(0.6, H2, D - 6),
+		CFrame = CFrame.new(cx + (W-6)/2, Y0 + H1 + H2/2, cz),
+		Color = C.GlassDark, Material = Enum.Material.Glass,
+		Transparency = 0.4,
+	})
+	-- Upper roof
+	part(model, {
+		Name = "UpperRoof",
+		Size = Vector3.new(W - 6, 0.8, D - 6),
+		CFrame = CFrame.new(cx, Y0 + H1 + H2, cz),
+		Color = C.Roof, Material = Enum.Material.Slate,
+	})
+	-- Roof tower
+	part(model, {
+		Name = "RoofTower",
+		Size = Vector3.new(W - 14, H3, D - 14),
+		CFrame = CFrame.new(cx, Y0 + H1 + H2 + H3/2, cz),
+		Color = C.Roof, Material = Enum.Material.Slate,
+	})
+	-- Grand entrance steps
+	part(model, {
+		Name = "Step1",
+		Size = Vector3.new(20, 0.8, 4),
+		CFrame = CFrame.new(cx, Y0 - 1, frontZ - 4),
+		Color = C.Steps, Material = Enum.Material.Concrete,
+	})
+	part(model, {
+		Name = "Step2",
+		Size = Vector3.new(18, 0.8, 3),
+		CFrame = CFrame.new(cx, Y0 - 0.2, frontZ - 7.5),
+		Color = C.Steps, Material = Enum.Material.Concrete,
+	})
+	part(model, {
+		Name = "Step3",
+		Size = Vector3.new(16, 0.8, 3),
+		CFrame = CFrame.new(cx, Y0 + 0.6, frontZ - 10.5),
+		Color = C.Steps, Material = Enum.Material.Concrete,
+	})
+	-- Grand entrance columns
+	for x = -1, 1, 2 do
+		part(model, {
+			Name = "EntrancePillar_" .. x,
+			Size = Vector3.new(3, 10, 3),
+			CFrame = CFrame.new(cx + (x * 10), Y0 + 5, frontZ - 1),
+			Color = C.Pillar, Material = Enum.Material.Concrete,
+		})
+		part(model, {
+			Name = "PillarCap_" .. x,
+			Size = Vector3.new(3.5, 0.5, 3.5),
+			CFrame = CFrame.new(cx + (x * 10), Y0 + 10.5, frontZ - 1),
+			Color = C.Gold,
+		})
+	end
+	-- Gold awning/canopy
+	part(model, {
+		Name = "Awning",
+		Size = Vector3.new(22, 1, 5),
+		CFrame = CFrame.new(cx, Y0 + 11, frontZ - 2.5),
+		Color = C.Trim,
+	})
+	-- Gold trim strip under awning
+	part(model, {
+		Name = "AwningGoldStrip",
+		Size = Vector3.new(22, 0.3, 5.2),
+		CFrame = CFrame.new(cx, Y0 + 10.4, frontZ - 2.5),
+		Color = C.Gold,
+	})
+	-- Marquee bulbs along front
+	for i = -9, 9, 3 do
+		local bulb = part(model, {
+			Name = "MarqueeBulb",
+			Size = Vector3.new(0.5, 0.5, 0.5),
+			CFrame = CFrame.new(cx + i, Y0 + 11.8, frontZ - 2.5),
+			Color = C.GoldBright,
+			Shape = Enum.PartType.Ball,
+		})
+		addPointLight(bulb, 0.4, 6, Color3.fromRGB(255, 215, 100))
+	end
+	-- Entrance sign (large, mounted above awning for clear visibility)
+	local entranceSign = part(model, {
+		Name = "EntranceSign",
+		Size = Vector3.new(20, 4, 0.5),
+		CFrame = CFrame.new(cx, Y0 + 12.8, frontZ - 3),
+		Color = C.SignBg,
+	})
+	addSign(entranceSign, Enum.NormalId.Front, playerName .. "'s Casino", C.GoldBright, C.SignBg)
+	-- Rooftop sign (visible from distance)
+	local roofSign = part(model, {
+		Name = "RooftopSign",
+		Size = Vector3.new(16, 3.5, 0.5),
+		CFrame = CFrame.new(cx, Y0 + H1 + H2 + H3 + 2, cz - (D-14)/2),
+		Color = C.SignBg,
+	})
+	addSign(roofSign, Enum.NormalId.Front, playerName .. "'s Casino", C.GoldBright, C.SignBg)
+	-- Interior: wide carpet
+	part(model, {
+		Name = "MainCarpet",
+		Size = Vector3.new(W - 12, 0.1, D - 12),
+		CFrame = CFrame.new(cx, Y0 + 0.4, cz),
+		Color = C.CarpetRed, Material = Enum.Material.Fabric,
+	})
+	-- Full bar with stools
+	part(model, {
+		Name = "BarCounter",
+		Size = Vector3.new(18, 1.8, 3),
+		CFrame = CFrame.new(cx, Y0 + 0.9, cz + D/2 - 3.5),
+		Color = C.Bar, Material = Enum.Material.Wood,
+	})
+	part(model, {
+		Name = "BarTop",
+		Size = Vector3.new(18.5, 0.2, 3.3),
+		CFrame = CFrame.new(cx, Y0 + 2.8, cz + D/2 - 3.5),
+		Color = C.BarTop,
+	})
+	for i = 1, 6 do
+		local stoolX = cx - 7 + ((i - 1) * 3)
+		part(model, {
+			Name = "BarStool_" .. i,
+			Size = Vector3.new(1, 1.2, 1),
+			CFrame = CFrame.new(stoolX, Y0 + 0.6, cz + D/2 - 5),
+			Color = C.Stool,
+		})
+	end
+	-- Grand chandelier
+	local chandelier = part(model, {
+		Name = "Chandelier",
+		Size = Vector3.new(5, 0.8, 5),
+		CFrame = CFrame.new(cx, Y0 + H1 - 2.5, cz),
+		Color = C.Chandelier,
+	})
+	addPointLight(chandelier, 2.5, 45, Color3.fromRGB(255, 230, 190))
+	-- Crystal drops
+	for i = 0, 7 do
+		local angle = (i / 8) * math.pi * 2
+		part(model, {
+			Name = "CrystalDrop",
+			Size = Vector3.new(0.4, 1.5, 0.4),
+			CFrame = CFrame.new(cx + math.cos(angle) * 2.2, Y0 + H1 - 4, cz + math.sin(angle) * 2.2),
+			Color = C.Chandelier, Material = Enum.Material.Glass,
+			Transparency = 0.3,
+		})
+	end
+	-- Ambient ceiling lights (soft, spread out)
+	for x = -1, 1, 2 do
+		for z = -1, 1, 2 do
+			local lightHost = part(model, {
+				Name = "AmbientLight",
+				Size = Vector3.new(1.2, 0.4, 1.2),
+				CFrame = CFrame.new(cx + (x * 14), Y0 + H1 - 1.5, cz + (z * 14)),
+				Color = C.Chandelier,
+			})
+			addPointLight(lightHost, 1, 28, Color3.fromRGB(255, 230, 190))
+		end
+	end
+	-- Bar pendant lights
+	for i = 1, 5 do
+		local lightX = cx - 6 + ((i - 1) * 3)
+		local lightHost = part(model, {
+			Name = "BarLight_" .. i,
+			Size = Vector3.new(0.8, 0.5, 0.8),
+			CFrame = CFrame.new(lightX, Y0 + H1 - 2, cz + D/2 - 3.5),
+			Color = C.Chandelier,
+		})
+		addPointLight(lightHost, 0.8, 16, Color3.fromRGB(255, 230, 190))
+	end
+
+	-- ══ Brainrot pedestals (10 ground floor spots for Mega) ══
+	addBrainrotPedestals(model, cx, Y0, cz, W, D, 10)
+
+	-- ══ Ladder to upper floor (back-right, INSIDE upper floor area) ══
+	local ladderX = cx + 10
+	local ladderZ = cz + 19   -- inside upper floor (back edge at cz+22)
+	local ladderH = H1         -- ground to upper floor
+	local rungCount = 14
+	-- Left rail
+	part(model, {
+		Name = "LadderRailL",
+		Size = Vector3.new(0.3, ladderH, 0.3),
+		CFrame = CFrame.new(ladderX - 1, Y0 + ladderH/2, ladderZ),
+		Color = Color3.fromRGB(160, 140, 100), Material = Enum.Material.Metal,
+	})
+	-- Right rail
+	part(model, {
+		Name = "LadderRailR",
+		Size = Vector3.new(0.3, ladderH, 0.3),
+		CFrame = CFrame.new(ladderX + 1, Y0 + ladderH/2, ladderZ),
+		Color = Color3.fromRGB(160, 140, 100), Material = Enum.Material.Metal,
+	})
+	-- Rungs
+	for r = 1, rungCount do
+		part(model, {
+			Name = "LadderRung_" .. r,
+			Size = Vector3.new(2, 0.25, 0.3),
+			CFrame = CFrame.new(ladderX, Y0 + r, ladderZ),
+			Color = Color3.fromRGB(180, 160, 110), Material = Enum.Material.Metal,
+		})
+	end
+	-- Railing around hole so players don't fall in
+	part(model, {
+		Name = "HoleRailBack",
+		Size = Vector3.new(8, 3, 0.3),
+		CFrame = CFrame.new(cx + 10, Y0 + H1 + 1.5, cz + 21.8),
+		Color = Color3.fromRGB(160, 140, 100), Material = Enum.Material.Metal,
+	})
+	part(model, {
+		Name = "HoleRailLeft",
+		Size = Vector3.new(0.3, 3, 6),
+		CFrame = CFrame.new(cx + 6.2, Y0 + H1 + 1.5, cz + 19),
+		Color = Color3.fromRGB(160, 140, 100), Material = Enum.Material.Metal,
+	})
+	part(model, {
+		Name = "HoleRailRight",
+		Size = Vector3.new(0.3, 3, 6),
+		CFrame = CFrame.new(cx + 13.8, Y0 + H1 + 1.5, cz + 19),
+		Color = Color3.fromRGB(160, 140, 100), Material = Enum.Material.Metal,
+	})
+
+	-- ══ Upper floor brainrot pedestals (6 spots, slots 11-16) ══
+	local upperY = Y0 + H1          -- upper floor surface Y
+	local upperW = W - 6             -- 44
+	local upperD = D - 6             -- 44
+	local upperLeftX  = cx - upperW/2 + 4
+	local upperRightX = cx + upperW/2 - 4
+	local upperStartZ = cz - upperD/2 + 5
+	local upperEndZ   = cz + upperD/2 - 5
+	local upperSpacing = (upperEndZ - upperStartZ) / 2  -- 3 per side
+	for i = 1, 3 do
+		local zPos = upperStartZ + (i - 1) * upperSpacing
+		-- Left side pedestal (slots 11, 12, 13)
+		local slotL = 10 + i
+		part(model, {
+			Name = "PedestalBase_" .. slotL,
+			Size = Vector3.new(4, 0.5, 4),
+			CFrame = CFrame.new(upperLeftX, upperY + 0.25, zPos),
+			Color = Color3.fromRGB(60, 60, 70), Material = Enum.Material.SmoothPlastic,
+		})
+		part(model, {
+			Name = "PedestalTop_" .. slotL,
+			Size = Vector3.new(3.8, 0.08, 3.8),
+			CFrame = CFrame.new(upperLeftX, upperY + 0.51, zPos),
+			Color = Color3.fromRGB(90, 90, 100), Material = Enum.Material.SmoothPlastic,
+		})
+		local anchorL = part(model, {
+			Name = "BrainrotPedestal_" .. slotL,
+			Size = Vector3.new(2, 0.1, 2),
+			CFrame = CFrame.new(upperLeftX, upperY + 0.6, zPos),
+			Color = Color3.new(1, 1, 1), Transparency = 1, CanCollide = false,
+		})
+		anchorL.CanCollide = false
+		-- Right side pedestal (slots 14, 15, 16)
+		local slotR = 13 + i
+		part(model, {
+			Name = "PedestalBase_" .. slotR,
+			Size = Vector3.new(4, 0.5, 4),
+			CFrame = CFrame.new(upperRightX, upperY + 0.25, zPos),
+			Color = Color3.fromRGB(60, 60, 70), Material = Enum.Material.SmoothPlastic,
+		})
+		part(model, {
+			Name = "PedestalTop_" .. slotR,
+			Size = Vector3.new(3.8, 0.08, 3.8),
+			CFrame = CFrame.new(upperRightX, upperY + 0.51, zPos),
+			Color = Color3.fromRGB(90, 90, 100), Material = Enum.Material.SmoothPlastic,
+		})
+		local anchorR = part(model, {
+			Name = "BrainrotPedestal_" .. slotR,
+			Size = Vector3.new(2, 0.1, 2),
+			CFrame = CFrame.new(upperRightX, upperY + 0.6, zPos),
+			Color = Color3.new(1, 1, 1), Transparency = 1, CanCollide = false,
+		})
+		anchorR.CanCollide = false
+	end
+
+	model.Parent = workspace
+	return model
+end
+-- ============================================================================
+-- MAIN MODULE FUNCTION
+-- ============================================================================
+function CasinoBuilderTiers.build(lotPart, casinoLevel, playerName)
+	local level = math.clamp(casinoLevel or 1, 1, 4)
+	if level == 1 then
+		return buildSmall(lotPart, playerName)
+	elseif level == 2 then
+		return buildMedium(lotPart, playerName)
+	elseif level == 3 then
+		return buildLarge(lotPart, playerName)
+	else
+		return buildMega(lotPart, playerName)
+	end
+end
+return CasinoBuilderTiers
