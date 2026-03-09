@@ -1,0 +1,935 @@
+--[[
+	BrainrotService.lua  (ModuleScript)
+	Place in ServerScriptService/Services/BrainrotService
+
+	Core server logic for the brainrot collection system:
+	  • Add / remove brainrots from a player's inventory
+	  • Assign / unassign brainrots to pedestal slots (press E)
+	  • Per-brainrot income accumulation
+	  • Spawn 3D brainrot display models on casino pedestals
+	  • Spawn income collection tiles in front of each pedestal
+	  • Walk-over tile collection (like Steal a Brainrot)
+
+	UPDATED: Per-brainrot income tiles, $/sec display, walk-over collection
+--]]
+
+local ServerScriptService = game:GetService("ServerScriptService")
+local ReplicatedStorage   = game:GetService("ReplicatedStorage")
+local Players             = game:GetService("Players")
+local Workspace           = game:GetService("Workspace")
+
+local BrainrotService = {}
+
+local DataManager, BrainrotConfig, LotService
+
+-- Track active income tiles so we can update their display text
+-- Structure: { [player] = { [pedestalSlot] = { tile=Part, label=TextLabel, brainrotId=string, accumulated=number } } }
+local ActiveIncomeTiles = {}
+
+-- Reference to BrainrotServer's equipped brainrot ID tracker (set via setEquippedTracker)
+local EquippedBrainrotIds = {}
+-- Callback to unequip a brainrot after placing (set via setEquippedTracker)
+local OnPlacedCallback = nil
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- INIT
+-- ═══════════════════════════════════════════════════════════════════════════
+function BrainrotService.init(dm, config, ls)
+	DataManager   = dm
+	BrainrotConfig = config
+	LotService    = ls
+	print("[BrainrotService] Initialized")
+end
+
+--- Called by BrainrotServer to share the equipped-brainrot tracker
+--- @param equippedTable table  { [player] = brainrotId }
+--- @param onPlaced function(player)  called after placing to unequip the held brainrot
+function BrainrotService.setEquippedTracker(equippedTable, onPlaced)
+	EquippedBrainrotIds = equippedTable
+	OnPlacedCallback = onPlaced
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- HELPERS
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local function getPlayerData(player)
+	local data = DataManager:GetData(player)
+	if not data then return nil end
+	if not data.Brainrots then data.Brainrots = {} end
+	if not data.BrainrotPendingIncome then data.BrainrotPendingIncome = 0 end
+	if not data.BrainrotLastTick then data.BrainrotLastTick = os.time() end
+	-- ALWAYS recalculate slots from CasinoLevel (don't cache stale 0)
+	data.BrainrotSlots = BrainrotConfig.SlotsPerLevel[data.CasinoLevel or 0] or 0
+	-- Per-brainrot pending income (keyed by inventory index)
+	if not data.BrainrotTileIncome then data.BrainrotTileIncome = {} end
+	return data
+end
+
+local function formatCash(amount)
+	if amount >= 1000000 then
+		return string.format("$%.1fM", amount / 1000000)
+	elseif amount >= 1000 then
+		return string.format("$%.1fK", amount / 1000)
+	else
+		return "$" .. tostring(math.floor(amount))
+	end
+end
+
+-- Calculate total income per minute from all assigned (slotted) brainrots
+local function calcIncomePerMin(data)
+	local total = 0
+	for _, entry in ipairs(data.Brainrots) do
+		if entry.pedestalSlot and entry.pedestalSlot > 0 then
+			local cfg = BrainrotConfig.getById(entry.id)
+			if cfg then
+				total = total + cfg.incomePerMin
+			end
+		end
+	end
+	return total
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- PER-BRAINROT INCOME ACCUMULATION
+-- ═══════════════════════════════════════════════════════════════════════════
+
+--- Tick income for each individual brainrot on a pedestal
+function BrainrotService.tickIncome(player)
+	local data = getPlayerData(player)
+	if not data then return end
+
+	local now = os.time()
+	local elapsed = now - (data.BrainrotLastTick or now)
+	if elapsed <= 0 then
+		data.BrainrotLastTick = now
+		return
+	end
+
+	-- Cap offline income
+	local maxSeconds = (BrainrotConfig.Income.MaxOfflineMinutes or 480) * 60
+	elapsed = math.min(elapsed, maxSeconds)
+
+	-- Accumulate income PER brainrot on a pedestal
+	for i, entry in ipairs(data.Brainrots) do
+		if entry.pedestalSlot and entry.pedestalSlot > 0 then
+			local cfg = BrainrotConfig.getById(entry.id)
+			if cfg and cfg.incomePerMin > 0 then
+				local earned = math.floor(cfg.incomePerMin * (elapsed / 60))
+				local key = tostring(i)  -- inventory index as string key
+				data.BrainrotTileIncome[key] = (data.BrainrotTileIncome[key] or 0) + earned
+			end
+		end
+	end
+
+	-- Also keep the global pending for backward compat
+	local ipm = calcIncomePerMin(data)
+	if ipm > 0 then
+		local earned = math.floor(ipm * (elapsed / 60))
+		data.BrainrotPendingIncome = (data.BrainrotPendingIncome or 0) + earned
+	end
+
+	data.BrainrotLastTick = now
+end
+
+--- Collect income from a SPECIFIC brainrot tile (by inventory index)
+function BrainrotService.collectTileIncome(player, inventoryIndex)
+	local data = getPlayerData(player)
+	if not data then return 0 end
+
+	local key = tostring(inventoryIndex)
+	local pending = data.BrainrotTileIncome[key] or 0
+	if pending <= 0 then return 0 end
+
+	-- Add to cash
+	data.Cash = (data.Cash or 0) + pending
+	data.TotalEarned = (data.TotalEarned or 0) + pending
+	data.BrainrotTileIncome[key] = 0
+
+	-- Also reduce from global pending (keep in sync)
+	data.BrainrotPendingIncome = math.max(0, (data.BrainrotPendingIncome or 0) - pending)
+
+	-- Sync HUD cash
+	pcall(function()
+		local Events = ReplicatedStorage:FindFirstChild("Events")
+		if Events then
+			local updateCurrency = Events:FindFirstChild("UpdateCurrency")
+			if updateCurrency then
+				updateCurrency:FireClient(player, data.Cash)
+			end
+		end
+	end)
+
+	pcall(function() DataManager:CheckLevelUp(player) end)
+
+	return pending
+end
+
+--- Collect ALL pending income at once (legacy fallback)
+function BrainrotService.collectIncome(player)
+	local data = getPlayerData(player)
+	if not data then return 0 end
+
+	BrainrotService.tickIncome(player)
+
+	-- Collect all tile incomes
+	local totalCollected = 0
+	for key, amount in pairs(data.BrainrotTileIncome) do
+		if amount > 0 then
+			totalCollected = totalCollected + amount
+			data.BrainrotTileIncome[key] = 0
+		end
+	end
+
+	-- Also collect global pending
+	local globalPending = data.BrainrotPendingIncome or 0
+	if globalPending > totalCollected then
+		totalCollected = globalPending  -- use the bigger number
+	end
+
+	if totalCollected <= 0 then return 0 end
+
+	data.Cash = (data.Cash or 0) + totalCollected
+	data.TotalEarned = (data.TotalEarned or 0) + totalCollected
+	data.BrainrotPendingIncome = 0
+
+	pcall(function()
+		local Events = ReplicatedStorage:FindFirstChild("Events")
+		if Events then
+			local updateCurrency = Events:FindFirstChild("UpdateCurrency")
+			if updateCurrency then
+				updateCurrency:FireClient(player, data.Cash)
+			end
+		end
+	end)
+
+	pcall(function() DataManager:CheckLevelUp(player) end)
+
+	print("[BrainrotService] " .. player.Name .. " collected $" .. totalCollected .. " brainrot income")
+	return totalCollected
+end
+
+--- Get current pending income (for UI display)
+function BrainrotService.getPendingIncome(player)
+	local data = getPlayerData(player)
+	if not data then return 0, 0 end
+
+	local now = os.time()
+	local elapsed = math.min(
+		now - (data.BrainrotLastTick or now),
+		(BrainrotConfig.Income.MaxOfflineMinutes or 480) * 60
+	)
+	local ipm = calcIncomePerMin(data)
+	local liveIncome = math.floor(ipm * math.max(0, elapsed) / 60)
+
+	return (data.BrainrotPendingIncome or 0) + liveIncome, ipm
+end
+
+--- Get tile income for a specific brainrot (by inventory index)
+function BrainrotService.getTileIncome(player, inventoryIndex)
+	local data = getPlayerData(player)
+	if not data then return 0 end
+	local key = tostring(inventoryIndex)
+	return data.BrainrotTileIncome[key] or 0
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- INVENTORY MANAGEMENT
+-- ═══════════════════════════════════════════════════════════════════════════
+
+function BrainrotService.addBrainrot(player, brainrotId)
+	local data = getPlayerData(player)
+	if not data then return false, "Data not loaded" end
+
+	local cfg = BrainrotConfig.getById(brainrotId)
+	if not cfg then return false, "Unknown brainrot" end
+
+	table.insert(data.Brainrots, {
+		id = brainrotId,
+		pedestalSlot = 0,
+	})
+
+	print("[BrainrotService] " .. player.Name .. " collected " .. cfg.name)
+	return true
+end
+
+function BrainrotService.buyBrainrot(player, brainrotId)
+	local data = getPlayerData(player)
+	if not data then return false, "Data not loaded" end
+
+	local cfg = BrainrotConfig.getById(brainrotId)
+	if not cfg then return false, "Unknown brainrot" end
+	if not cfg.shopPrice then return false, "Not for sale" end
+
+	if (data.Cash or 0) < cfg.shopPrice then
+		return false, "Not enough cash"
+	end
+
+	data.Cash = data.Cash - cfg.shopPrice
+
+	table.insert(data.Brainrots, {
+		id = brainrotId,
+		pedestalSlot = 0,
+	})
+
+	pcall(function()
+		local Events = ReplicatedStorage:FindFirstChild("Events")
+		if Events then
+			local updateCurrency = Events:FindFirstChild("UpdateCurrency")
+			if updateCurrency then
+				updateCurrency:FireClient(player, data.Cash)
+			end
+		end
+	end)
+
+	pcall(function() DataManager:CheckLevelUp(player) end)
+
+	print("[BrainrotService] " .. player.Name .. " bought " .. cfg.name .. " for $" .. cfg.shopPrice)
+	return true
+end
+
+function BrainrotService.assignToPedestal(player, inventoryIndex, slot)
+	local data = getPlayerData(player)
+	if not data then return false, "Data not loaded" end
+
+	local entry = data.Brainrots[inventoryIndex]
+	if not entry then return false, "Invalid brainrot index" end
+
+	local maxSlots = data.BrainrotSlots or 0
+	if slot < 0 or slot > maxSlots then return false, "Invalid slot" end
+
+	-- Tick income before changing assignment
+	BrainrotService.tickIncome(player)
+
+	if slot == 0 then
+		-- Collect any remaining tile income before unassigning
+		BrainrotService.collectTileIncome(player, inventoryIndex)
+		entry.pedestalSlot = 0
+		BrainrotService.refreshPedestalModels(player)
+		return true
+	end
+
+	-- Check if another brainrot is already on that slot — bump it off
+	for i, other in ipairs(data.Brainrots) do
+		if i ~= inventoryIndex and other.pedestalSlot == slot then
+			BrainrotService.collectTileIncome(player, i)
+			other.pedestalSlot = 0
+		end
+	end
+
+	entry.pedestalSlot = slot
+	BrainrotService.refreshPedestalModels(player)
+	return true
+end
+
+function BrainrotService.getInventory(player)
+	local data = getPlayerData(player)
+	if not data then return {}, 0 end
+
+	local inv = {}
+	for i, entry in ipairs(data.Brainrots) do
+		local cfg = BrainrotConfig.getById(entry.id)
+		if cfg then
+			table.insert(inv, {
+				index        = i,
+				id           = entry.id,
+				name         = cfg.name,
+				rarity       = cfg.rarity,
+				incomePerMin = cfg.incomePerMin,
+				imageId      = cfg.imageId,
+				pedestalSlot = entry.pedestalSlot or 0,
+			})
+		end
+	end
+
+	return inv, data.BrainrotSlots or 0
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- PEDESTAL MODEL + INCOME TILE MANAGEMENT
+-- ═══════════════════════════════════════════════════════════════════════════
+
+--- Spawn a brainrot display model + income collection tile on a pedestal anchor
+local function spawnPedestalModel(player, anchor, brainrotCfg, slot, inventoryIndex)
+	-- Remove existing model on this anchor
+	for _, child in ipairs(anchor:GetChildren()) do
+		if child.Name == "BrainrotDisplay" or child.Name == "IncomeTile" then
+			child:Destroy()
+		end
+	end
+
+	local rarityInfo = BrainrotConfig.Rarities[brainrotCfg.rarity]
+	local rarityColor = rarityInfo and rarityInfo.Color or Color3.fromRGB(180, 180, 180)
+
+	-- ══════════════════════════════════════
+	-- COMPUTE FACING DIRECTION (toward casino center)
+	-- ══════════════════════════════════════
+	local casinoModel = anchor.Parent
+	local anchorPos = anchor.Position
+	local centerX, centerZ = anchorPos.X, anchorPos.Z
+	if casinoModel then
+		local storedCX = casinoModel:GetAttribute("CasinoCenterX")
+		local storedCZ = casinoModel:GetAttribute("CasinoCenterZ")
+		if storedCX and storedCZ then
+			centerX = storedCX
+			centerZ = storedCZ
+		end
+	end
+
+	-- Build a CFrame that faces the brainrot toward the casino center
+	-- Anchor is at top of solid platform (Y0 + 0.6)
+	local displayY = anchorPos.Y + 1.1  -- center of brainrot sitting on the platform
+	local displayPos = Vector3.new(anchorPos.X, displayY, anchorPos.Z)
+	local lookTarget = Vector3.new(centerX, displayY, centerZ)
+	local facingCFrame
+	if (displayPos - lookTarget).Magnitude > 0.1 then
+		facingCFrame = CFrame.lookAt(displayPos, lookTarget)
+	else
+		facingCFrame = CFrame.new(displayPos)
+	end
+
+	-- ══════════════════════════════════════
+	-- BRAINROT DISPLAY MODEL
+	-- ══════════════════════════════════════
+	local model = Instance.new("Model")
+	model.Name = "BrainrotDisplay"
+
+	-- Try loading a real 3D mesh from the catalog
+	local meshClone = BrainrotConfig.loadMesh(brainrotCfg.accessoryId)
+
+	local display
+	if meshClone then
+		display = meshClone
+		display.Name = "BrainrotModel"
+		display.Anchored = true
+		display.CanCollide = false
+		display.Size = Vector3.new(2.5, 2.5, 2.5)
+		display.CFrame = facingCFrame
+		display.Parent = model
+	else
+		-- Fallback: plain cube with decals
+		display = Instance.new("Part")
+		display.Name = "BrainrotModel"
+		display.Anchored = true
+		display.CanCollide = false
+		display.Size = Vector3.new(2, 2, 2)
+		display.CFrame = facingCFrame
+		display.Color = brainrotCfg.modelColor or Color3.fromRGB(200, 170, 60)
+		display.Material = Enum.Material.SmoothPlastic
+		display.Transparency = 0
+		display.TopSurface = Enum.SurfaceType.Smooth
+		display.BottomSurface = Enum.SurfaceType.Smooth
+		display.Parent = model
+
+		for _, face in ipairs({Enum.NormalId.Front, Enum.NormalId.Back, Enum.NormalId.Left, Enum.NormalId.Right}) do
+			local decal = Instance.new("Decal")
+			decal.Face = face
+			decal.Texture = brainrotCfg.imageId or ""
+			decal.Parent = display
+		end
+	end
+
+	-- (Pedestal platform is built by CasinoBuilderTiers — always visible)
+
+	-- ══════════════════════════════════════
+	-- BILLBOARD: Name + Rarity + $/sec
+	-- ══════════════════════════════════════
+	local bb = Instance.new("BillboardGui")
+	bb.Name = "InfoBoard"
+	bb.Size = UDim2.new(0, 220, 0, 80)
+	bb.StudsOffset = Vector3.new(0, 2, 0)
+	bb.AlwaysOnTop = false
+	bb.MaxDistance = 50
+	bb.Parent = display
+
+	local nameLabel = Instance.new("TextLabel")
+	nameLabel.Name = "NameLabel"
+	nameLabel.Size = UDim2.new(1, 0, 0.35, 0)
+	nameLabel.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	nameLabel.BackgroundTransparency = 0.4
+	nameLabel.Text = brainrotCfg.name
+	nameLabel.TextColor3 = rarityColor
+	nameLabel.Font = Enum.Font.GothamBold
+	nameLabel.TextScaled = true
+	nameLabel.Parent = bb
+
+	local nameCorner = Instance.new("UICorner")
+	nameCorner.CornerRadius = UDim.new(0, 4)
+	nameCorner.Parent = nameLabel
+
+	local rarityLabel = Instance.new("TextLabel")
+	rarityLabel.Name = "RarityLabel"
+	rarityLabel.Size = UDim2.new(1, 0, 0.25, 0)
+	rarityLabel.Position = UDim2.new(0, 0, 0.37, 0)
+	rarityLabel.BackgroundTransparency = 1
+	rarityLabel.Text = "★ " .. brainrotCfg.rarity .. " ★"
+	rarityLabel.TextColor3 = rarityColor
+	rarityLabel.Font = Enum.Font.GothamMedium
+	rarityLabel.TextScaled = true
+	rarityLabel.Parent = bb
+
+	-- $/sec display
+	local perSec = brainrotCfg.incomePerMin / 60
+	local perSecText = string.format("$%.1f/sec", perSec)
+	local incomeLabel = Instance.new("TextLabel")
+	incomeLabel.Name = "IncomeLabel"
+	incomeLabel.Size = UDim2.new(1, 0, 0.3, 0)
+	incomeLabel.Position = UDim2.new(0, 0, 0.65, 0)
+	incomeLabel.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	incomeLabel.BackgroundTransparency = 0.4
+	incomeLabel.Text = perSecText
+	incomeLabel.TextColor3 = Color3.fromRGB(80, 220, 80)
+	incomeLabel.Font = Enum.Font.GothamBold
+	incomeLabel.TextScaled = true
+	incomeLabel.Parent = bb
+
+	local incomeCorner = Instance.new("UICorner")
+	incomeCorner.CornerRadius = UDim.new(0, 4)
+	incomeCorner.Parent = incomeLabel
+
+	model.PrimaryPart = display
+	model.Parent = anchor
+
+	-- ══════════════════════════════════════
+	-- INCOME COLLECTION TILE (on the floor in front of the brainrot)
+	-- Placed toward the CENTER of the casino (away from the wall)
+	-- ══════════════════════════════════════
+
+	-- Direction from anchor toward casino center (centerX/centerZ computed above)
+	local dx = centerX - anchorPos.X
+	local dz = centerZ - anchorPos.Z
+	local dist = math.sqrt(dx * dx + dz * dz)
+	if dist < 0.1 then
+		-- Fallback: just put it in front (positive X)
+		dx = 1
+		dz = 0
+		dist = 1
+	end
+	-- Normalize and offset 4 studs toward center
+	local offsetDist = 4
+	local tileX = anchorPos.X + (dx / dist) * offsetDist
+	local tileZ = anchorPos.Z + (dz / dist) * offsetDist
+	-- Put tile ON TOP of the carpet (carpet top is ~Y0+0.34, anchor is at Y0+0.6)
+	-- So tile sits at anchorPos.Y - 0.15 which puts it right above carpet level
+	local tileY = anchorPos.Y - 0.1
+
+	local tile = Instance.new("Part")
+	tile.Name = "IncomeTile"
+	tile.Anchored = true
+	tile.CanCollide = false
+	tile.Size = Vector3.new(5, 0.15, 5)
+	tile.CFrame = CFrame.new(tileX, tileY, tileZ)
+	tile.Color = Color3.fromRGB(40, 200, 70)
+	tile.Material = Enum.Material.SmoothPlastic
+	tile.Transparency = 0
+	tile.TopSurface = Enum.SurfaceType.Smooth
+	tile.BottomSurface = Enum.SurfaceType.Smooth
+	tile.Parent = anchor
+
+	-- SurfaceGui on top of the tile showing accumulated cash (big bold text)
+	local surfaceGui = Instance.new("SurfaceGui")
+	surfaceGui.Name = "TileDisplay"
+	surfaceGui.Face = Enum.NormalId.Top
+	surfaceGui.CanvasSize = Vector2.new(300, 300)
+	surfaceGui.Parent = tile
+
+	local cashLabel = Instance.new("TextLabel")
+	cashLabel.Name = "CashLabel"
+	cashLabel.Size = UDim2.new(1, 0, 0.65, 0)
+	cashLabel.Position = UDim2.new(0, 0, 0.05, 0)
+	cashLabel.BackgroundTransparency = 1
+	cashLabel.Text = "$0"
+	cashLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+	cashLabel.TextStrokeTransparency = 0.3
+	cashLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+	cashLabel.Font = Enum.Font.GothamBold
+	cashLabel.TextScaled = true
+	cashLabel.Parent = surfaceGui
+
+	local collectHint = Instance.new("TextLabel")
+	collectHint.Name = "CollectHint"
+	collectHint.Size = UDim2.new(1, 0, 0.25, 0)
+	collectHint.Position = UDim2.new(0, 0, 0.7, 0)
+	collectHint.BackgroundTransparency = 1
+	collectHint.Text = "WALK TO COLLECT"
+	collectHint.TextColor3 = Color3.fromRGB(220, 220, 220)
+	collectHint.TextStrokeTransparency = 0.5
+	collectHint.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+	collectHint.Font = Enum.Font.GothamBold
+	collectHint.TextScaled = true
+	collectHint.Parent = surfaceGui
+
+	-- Store reference for income tile updates
+	if not ActiveIncomeTiles[player] then
+		ActiveIncomeTiles[player] = {}
+	end
+	ActiveIncomeTiles[player][slot] = {
+		tile = tile,
+		cashLabel = cashLabel,
+		brainrotId = brainrotCfg.id,
+		inventoryIndex = inventoryIndex,
+		collectHint = collectHint,
+	}
+
+	-- ══════════════════════════════════════
+	-- WALK-OVER COLLECTION (Touched event on the tile)
+	-- ══════════════════════════════════════
+	local collectDebounce = {}
+	tile.Touched:Connect(function(hit)
+		if not tile.Parent then return end
+
+		local character = hit.Parent
+		if not character then return end
+		local humanoid = character:FindFirstChildWhichIsA("Humanoid")
+		if not humanoid then return end
+		local touchPlayer = Players:GetPlayerFromCharacter(character)
+		if not touchPlayer then return end
+
+		-- Only the casino owner can collect from their own tiles
+		if touchPlayer ~= player then return end
+
+		-- Debounce (1 second cooldown)
+		local now = tick()
+		if collectDebounce[touchPlayer] and (now - collectDebounce[touchPlayer]) < 1 then
+			return
+		end
+		collectDebounce[touchPlayer] = now
+
+		-- Collect income for this specific brainrot
+		local collected = BrainrotService.collectTileIncome(player, inventoryIndex)
+		if collected > 0 then
+			-- Flash the tile gold briefly
+			local originalColor = tile.Color
+			tile.Color = Color3.fromRGB(255, 215, 0)
+			tile.Transparency = 0.2
+			task.delay(0.3, function()
+				if tile.Parent then
+					tile.Color = originalColor
+					tile.Transparency = 0.4
+				end
+			end)
+
+			-- Update the cash label to $0
+			if cashLabel.Parent then
+				cashLabel.Text = "$0"
+			end
+
+			-- Fire toast to player
+			pcall(function()
+				local EventsFolder = ReplicatedStorage:FindFirstChild("BrainrotEvents")
+				if EventsFolder then
+					local ShowPickupToast = EventsFolder:FindFirstChild("ShowPickupToast")
+					if ShowPickupToast then
+						ShowPickupToast:FireClient(player, brainrotCfg.name, "collect", collected)
+					end
+				end
+			end)
+
+			-- Sync inventory
+			pcall(function()
+				local EventsFolder = ReplicatedStorage:FindFirstChild("BrainrotEvents")
+				if EventsFolder then
+					local SyncInventory = EventsFolder:FindFirstChild("SyncInventory")
+					if SyncInventory then
+						local inventory, maxSlots = BrainrotService.getInventory(player)
+						SyncInventory:FireClient(player, inventory, maxSlots)
+					end
+				end
+			end)
+		end
+	end)
+
+	return model, tile
+end
+
+--- Refresh all pedestal models + income tiles for a player's casino
+--- Also adds ProximityPrompts on EMPTY pedestals so players can press E to place
+function BrainrotService.refreshPedestalModels(player)
+	local data = getPlayerData(player)
+	if not data then return end
+
+	local lotId = LotService and LotService.getPlayerLotId(player) or nil
+	if not lotId then return end
+
+	local casino = LotService.getCasino(lotId)
+	if not casino or not casino.Parent then return end
+
+	print("[BrainrotService] refreshPedestalModels for " .. player.Name .. " | CasinoLevel=" .. tostring(data.CasinoLevel) .. " | Slots=" .. tostring(data.BrainrotSlots))
+
+	-- Clear all existing brainrot displays, income tiles, and ALL prompts
+	for _, desc in ipairs(casino:GetDescendants()) do
+		if desc.Name == "BrainrotDisplay" or desc.Name == "IncomeTile"
+			or desc.Name == "PlacementPrompt" or desc.Name == "SellPrompt"
+			or desc.Name == "PickupPrompt" then
+			desc:Destroy()
+		end
+	end
+
+	-- Clear active tile references for this player
+	ActiveIncomeTiles[player] = {}
+
+	-- Build a set of occupied pedestal slots
+	local occupiedSlots = {}
+	for i, entry in ipairs(data.Brainrots) do
+		if entry.pedestalSlot and entry.pedestalSlot > 0 then
+			occupiedSlots[entry.pedestalSlot] = i
+		end
+	end
+
+	-- Spawn models + tiles + pickup/sell prompts for each ASSIGNED brainrot
+	for slot, inventoryIdx in pairs(occupiedSlots) do
+		local anchorName = "BrainrotPedestal_" .. slot
+		local anchor = casino:FindFirstChild(anchorName, true)
+		if anchor then
+			local entry = data.Brainrots[inventoryIdx]
+			local cfg = BrainrotConfig.getById(entry.id)
+			if cfg then
+				local displayModel = spawnPedestalModel(player, anchor, cfg, slot, inventoryIdx)
+				local promptParent = (displayModel and displayModel.PrimaryPart) or anchor
+				print("[BrainrotService] Placed " .. cfg.name .. " on slot " .. slot .. " | promptParent=" .. promptParent.Name)
+
+				-- ═══ E = Pick Up (unassign, return to inventory) ═══
+				local pickupPrompt = Instance.new("ProximityPrompt")
+				pickupPrompt.Name = "PickupPrompt"
+				pickupPrompt.ActionText = "Pick Up"
+				pickupPrompt.ObjectText = cfg.name
+				pickupPrompt.HoldDuration = 0.3
+				pickupPrompt.MaxActivationDistance = 10
+				pickupPrompt.KeyboardKeyCode = Enum.KeyCode.E
+				pickupPrompt.RequiresLineOfSight = false
+				pickupPrompt.Parent = promptParent
+
+				pickupPrompt.Triggered:Connect(function(triggerPlayer)
+					if triggerPlayer ~= player then return end
+					BrainrotService.collectTileIncome(player, inventoryIdx)
+					BrainrotService.assignToPedestal(triggerPlayer, inventoryIdx, 0)
+					-- Sync
+					pcall(function()
+						local ef = ReplicatedStorage:FindFirstChild("BrainrotEvents")
+						if ef then
+							local si = ef:FindFirstChild("SyncInventory")
+							if si then si:FireClient(triggerPlayer, BrainrotService.getInventory(triggerPlayer)) end
+							local st = ef:FindFirstChild("ShowPickupToast")
+							if st then st:FireClient(triggerPlayer, cfg.name .. " picked up!", "collect", 0) end
+						end
+					end)
+				end)
+
+				-- ═══ F = Sell (for half price, removes from inventory) ═══
+				local sellPrice = math.floor((cfg.shopPrice or cfg.streetPrice or 0) / 2)
+				local sellPrompt = Instance.new("ProximityPrompt")
+				sellPrompt.Name = "SellPrompt"
+				sellPrompt.ActionText = "Sell for $" .. tostring(sellPrice)
+				sellPrompt.ObjectText = cfg.name
+				sellPrompt.HoldDuration = 0.8
+				sellPrompt.MaxActivationDistance = 10
+				sellPrompt.KeyboardKeyCode = Enum.KeyCode.F
+				sellPrompt.RequiresLineOfSight = false
+				sellPrompt.Parent = promptParent
+
+				sellPrompt.Triggered:Connect(function(triggerPlayer)
+					if triggerPlayer ~= player then return end
+					BrainrotService.collectTileIncome(player, inventoryIdx)
+					local pData = getPlayerData(triggerPlayer)
+					if not pData then return end
+					pData.Cash = (pData.Cash or 0) + sellPrice
+					table.remove(pData.Brainrots, inventoryIdx)
+					-- Shift tile income indexes
+					local newTileIncome = {}
+					for key, val in pairs(pData.BrainrotTileIncome) do
+						local idx = tonumber(key)
+						if idx and idx < inventoryIdx then
+							newTileIncome[key] = val
+						elseif idx and idx > inventoryIdx then
+							newTileIncome[tostring(idx - 1)] = val
+						end
+					end
+					pData.BrainrotTileIncome = newTileIncome
+					-- Sync HUD cash
+					pcall(function()
+						local Events = ReplicatedStorage:FindFirstChild("Events")
+						if Events then
+							local uc = Events:FindFirstChild("UpdateCurrency")
+							if uc then uc:FireClient(triggerPlayer, pData.Cash) end
+						end
+					end)
+					-- Refresh + sync
+					BrainrotService.refreshPedestalModels(triggerPlayer)
+					pcall(function()
+						local ef = ReplicatedStorage:FindFirstChild("BrainrotEvents")
+						if ef then
+							local st = ef:FindFirstChild("ShowPickupToast")
+							if st then st:FireClient(triggerPlayer, cfg.name .. " sold for $" .. sellPrice, "collect", 0) end
+							local si = ef:FindFirstChild("SyncInventory")
+							if si then si:FireClient(triggerPlayer, BrainrotService.getInventory(triggerPlayer)) end
+						end
+					end)
+				end)
+			end
+		end
+	end
+
+	-- Add ProximityPrompts on EMPTY pedestal slots
+	local maxSlots = data.BrainrotSlots or 0
+
+	-- Fallback: if slots is 0 but pedestals physically exist, count them
+	if maxSlots == 0 then
+		for _, desc in ipairs(casino:GetDescendants()) do
+			if desc:IsA("BasePart") and desc.Name:match("^BrainrotPedestal_") then
+				local num = tonumber(desc.Name:match("(%d+)$"))
+				if num and num > maxSlots then maxSlots = num end
+			end
+		end
+		if maxSlots > 0 then
+			data.BrainrotSlots = maxSlots
+		end
+	end
+
+	print("[BrainrotService] maxSlots=" .. maxSlots .. " | occupied=" .. tostring(#occupiedSlots == 0 and "none" or "some"))
+
+	for s = 1, maxSlots do
+		if not occupiedSlots[s] then
+			local anchorName = "BrainrotPedestal_" .. s
+			local anchor = casino:FindFirstChild(anchorName, true)
+			if not anchor then
+				print("[BrainrotService] WARNING: anchor " .. anchorName .. " not found!")
+			end
+			if anchor then
+				-- Parent prompt to the visible pedestal base for better interaction
+				local pedestalBase = casino:FindFirstChild("PedestalBase_" .. s, true) or anchor
+				print("[BrainrotService] Creating PlacementPrompt on slot " .. s .. " | parent=" .. pedestalBase.Name)
+
+				local prompt = Instance.new("ProximityPrompt")
+				prompt.Name = "PlacementPrompt"
+				prompt.ActionText = "Place Brainrot"
+				prompt.ObjectText = "Empty Pedestal"
+				prompt.HoldDuration = 0
+				prompt.MaxActivationDistance = 12
+				prompt.KeyboardKeyCode = Enum.KeyCode.E
+				prompt.RequiresLineOfSight = false
+				prompt.Parent = pedestalBase
+
+				prompt.Triggered:Connect(function(triggerPlayer)
+					-- Only the casino owner can place
+					if triggerPlayer ~= player then return end
+
+					-- Check what brainrot the player is holding
+					local equippedId = EquippedBrainrotIds[triggerPlayer]
+					if not equippedId or equippedId == "" then
+						-- No brainrot equipped — nothing to place
+						return
+					end
+
+					-- Find the inventory index of the equipped brainrot (must be unplaced)
+					local playerData = getPlayerData(triggerPlayer)
+					if not playerData then return end
+					local inventoryIndex = nil
+					for i, entry in ipairs(playerData.Brainrots) do
+						if entry.id == equippedId and (not entry.pedestalSlot or entry.pedestalSlot == 0) then
+							inventoryIndex = i
+							break
+						end
+					end
+					if not inventoryIndex then return end
+
+					-- Place it!
+					local cfg = BrainrotConfig.getById(equippedId)
+					BrainrotService.assignToPedestal(triggerPlayer, inventoryIndex, s)
+
+					-- Unequip the held brainrot (it's now placed)
+					if OnPlacedCallback then
+						OnPlacedCallback(triggerPlayer)
+					end
+
+					-- Show "PLACED!" toast and sync inventory to client
+					pcall(function()
+						local EventsFolder = ReplicatedStorage:FindFirstChild("BrainrotEvents")
+						if EventsFolder then
+							local ShowPickupToast = EventsFolder:FindFirstChild("ShowPickupToast")
+							if ShowPickupToast and cfg then
+								ShowPickupToast:FireClient(triggerPlayer, cfg.name .. " placed!", "collect", 0)
+							end
+							local SyncInventory = EventsFolder:FindFirstChild("SyncInventory")
+							if SyncInventory then
+								local inventory, slots = BrainrotService.getInventory(triggerPlayer)
+								SyncInventory:FireClient(triggerPlayer, inventory, slots)
+							end
+						end
+					end)
+				end)
+			end
+		end
+	end
+end
+
+--- Update all income tile displays for a player (call this periodically)
+function BrainrotService.updateTileDisplays(player)
+	local data = getPlayerData(player)
+	if not data then return end
+
+	local tiles = ActiveIncomeTiles[player]
+	if not tiles then return end
+
+	for slot, tileInfo in pairs(tiles) do
+		if tileInfo.tile and tileInfo.tile.Parent and tileInfo.cashLabel and tileInfo.cashLabel.Parent then
+			local accumulated = data.BrainrotTileIncome[tostring(tileInfo.inventoryIndex)] or 0
+
+			-- Update tile text
+			tileInfo.cashLabel.Text = formatCash(accumulated)
+
+			-- Change tile color based on accumulated amount (green -> gold as it fills)
+			if accumulated > 0 then
+				local intensity = math.min(accumulated / 1000, 1)  -- caps visual at $1000
+				local r = math.floor(30 + (225 * intensity))
+				local g = math.floor(180 + (35 * intensity))
+				local b = math.floor(60 - (60 * intensity))
+				tileInfo.tile.Color = Color3.fromRGB(r, g, b)
+				tileInfo.tile.Transparency = 0.3 - (0.15 * intensity)
+			else
+				tileInfo.tile.Color = Color3.fromRGB(30, 180, 60)
+				tileInfo.tile.Transparency = 0.4
+			end
+		end
+	end
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- SLOT MANAGEMENT (called when casino is upgraded)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+function BrainrotService.updateSlots(player)
+	local data = getPlayerData(player)
+	if not data then return end
+
+	local level = data.CasinoLevel or 0
+	local newSlots = BrainrotConfig.SlotsPerLevel[level] or 0
+	data.BrainrotSlots = newSlots
+
+	for _, entry in ipairs(data.Brainrots) do
+		if entry.pedestalSlot and entry.pedestalSlot > newSlots then
+			entry.pedestalSlot = 0
+		end
+	end
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- ON JOIN / ON LEAVE
+-- ═══════════════════════════════════════════════════════════════════════════
+
+function BrainrotService.onPlayerJoin(player)
+	BrainrotService.tickIncome(player)
+	BrainrotService.updateSlots(player)
+
+	task.delay(3, function()
+		if player.Parent then
+			BrainrotService.refreshPedestalModels(player)
+		end
+	end)
+end
+
+function BrainrotService.onPlayerLeave(player)
+	BrainrotService.tickIncome(player)
+	ActiveIncomeTiles[player] = nil
+end
+
+return BrainrotService
