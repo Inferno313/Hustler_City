@@ -1,0 +1,381 @@
+--[[
+	CoinflipServer.lua  v3
+	Place as a Script in ServerScriptService.
+
+	• Uses DataManager module for cash (same as MainServer)
+	• Syncs HUD after every cash change via UpdateCurrency event
+	• Side picker — P1 chooses Tung Tung or Tralalelo
+	• Flip vs House — P1 pays 5% fee to skip waiting
+	• Min $500 / Max $50,000
+--]]
+
+local Players             = game:GetService("Players")
+local ReplicatedStorage   = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+local Workspace           = game:GetService("Workspace")
+
+-- ─── DataManager (same module MainServer uses) ────────────────────────────────
+local DataManager = require(ServerScriptService:WaitForChild("DataStoreManager"))
+
+-- ─── HUD sync event (fires UpdateCurrency so the cash display refreshes) ──────
+local Events = ReplicatedStorage:WaitForChild("Events")
+local updateCurrencyEvent = Events:WaitForChild("UpdateCurrency")
+
+-- ─── CONFIG ──────────────────────────────────────────────────────────────────
+local MIN_BET      = 500
+local MAX_BET      = 50000
+local HOUSE_FEE    = 0.05    -- 5 % fee for flipping vs house
+local FLIP_TIME    = 4.2     -- animation seconds
+local RESULT_TIME  = 3.5     -- result display seconds
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- REMOTE EVENTS
+-- ═══════════════════════════════════════════════════════════════════════════
+local eventsFolder = Instance.new("Folder")
+eventsFolder.Name   = "CoinflipEvents"
+eventsFolder.Parent = ReplicatedStorage
+
+local function remote(name)
+	local r = Instance.new("RemoteEvent")
+	r.Name   = name
+	r.Parent = eventsFolder
+	return r
+end
+
+-- Server → Client
+local ShowSidePicker = remote("ShowSidePicker")
+local ShowBetUI      = remote("ShowBetUI")
+local ShowWaitUI     = remote("ShowWaitUI")
+local ShowConfirmUI  = remote("ShowConfirmUI")
+local PlayFlipAnim   = remote("PlayFlipAnim")
+local ShowResult     = remote("ShowResult")
+local HideAllUI      = remote("HideAllUI")
+local SeatPlayer     = remote("SeatPlayer")
+local UnseatPlayer   = remote("UnseatPlayer")
+
+-- Client → Server
+local PickSide       = remote("PickSide")
+local SubmitBet      = remote("SubmitBet")
+local FlipVsHouse    = remote("FlipVsHouse")
+local ConfirmBet     = remote("ConfirmBet")
+local DeclineBet     = remote("DeclineBet")
+local LeaveSeat      = remote("LeaveSeat")
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- CASH HELPERS  (via DataManager — same system as MainServer)
+-- ═══════════════════════════════════════════════════════════════════════════
+local function getCash(plr)
+	local data = DataManager:GetData(plr)
+	return data and data.Cash or 0
+end
+
+local function addCash(plr, amount)
+	local data = DataManager:GetData(plr)
+	if not data then return end
+	data.Cash = (data.Cash or 0) + amount
+	if amount > 0 then
+		data.TotalEarned = (data.TotalEarned or 0) + amount
+		data.TotalWon    = (data.TotalWon or 0) + amount
+	end
+	if amount < 0 then
+		data.TotalWagered = (data.TotalWagered or 0) + math.abs(amount)
+	end
+	-- Sync HUD immediately so the player sees the change
+	pcall(function()
+		updateCurrencyEvent:FireClient(plr, data.Cash)
+	end)
+	-- Check for level-up from net worth change
+	pcall(function()
+		DataManager:CheckLevelUp(plr)
+	end)
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- TABLE STATE
+-- ═══════════════════════════════════════════════════════════════════════════
+local states = {}
+
+local function getState(tbl)
+	if not states[tbl] then
+		states[tbl] = {
+			player1 = nil,
+			player2 = nil,
+			bet     = 0,
+			p1Side  = nil,   -- "tung" or "trala"
+			phase   = "empty",
+		}
+	end
+	return states[tbl]
+end
+
+local function enablePrompt(seat, on)
+	local pp = seat and seat:FindFirstChildOfClass("ProximityPrompt")
+	if pp then pp.Enabled = on end
+end
+
+local function resetTable(tbl)
+	local s = getState(tbl)
+
+	if s.player1 and s.player1.Parent then
+		pcall(function() UnseatPlayer:FireClient(s.player1, tbl) end)
+		pcall(function() HideAllUI:FireClient(s.player1) end)
+	end
+	if s.player2 and s.player2.Parent then
+		pcall(function() UnseatPlayer:FireClient(s.player2, tbl) end)
+		pcall(function() HideAllUI:FireClient(s.player2) end)
+	end
+
+	s.player1 = nil
+	s.player2 = nil
+	s.bet     = 0
+	s.p1Side  = nil
+	s.phase   = "empty"
+
+	enablePrompt(tbl:FindFirstChild("Seat1"), true)
+	enablePrompt(tbl:FindFirstChild("Seat2"), false)
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- DO FLIP  (shared logic for PvP and vs House)
+-- ═══════════════════════════════════════════════════════════════════════════
+local function doFlip(tbl, s, p1Name, p2Name)
+	s.phase = "flipping"
+
+	-- 50/50 result: true = the coin lands on "tung" side
+	local landsSide = (math.random(2) == 1) and "tung" or "trala"
+	local p1Wins = (landsSide == s.p1Side)
+
+	-- Fire animation to seated players
+	if s.player1 and s.player1.Parent then
+		PlayFlipAnim:FireClient(s.player1, tbl, landsSide, s.p1Side, p1Name, p2Name, s.bet)
+	end
+	if s.player2 and s.player2.Parent then
+		local p2Side = (s.p1Side == "tung") and "trala" or "tung"
+		PlayFlipAnim:FireClient(s.player2, tbl, landsSide, p2Side, p1Name, p2Name, s.bet)
+	end
+
+	task.wait(FLIP_TIME)
+
+	-- Award winnings
+	if s.player2 then
+		-- PvP
+		local winner = p1Wins and s.player1 or s.player2
+		if winner and winner.Parent then
+			addCash(winner, s.bet * 2)
+		end
+	else
+		-- vs House: if player wins, return bet * 2 (they already paid bet + fee)
+		if p1Wins and s.player1 and s.player1.Parent then
+			addCash(s.player1, s.bet * 2)
+		end
+	end
+
+	s.phase = "result"
+
+	-- Record gambling stats via DataManager
+	if s.player1 and s.player1.Parent then
+		pcall(function()
+			DataManager:RecordGamble(s.player1, s.bet, p1Wins and s.bet or 0, "CoinFlip")
+		end)
+	end
+	if s.player2 and s.player2.Parent then
+		pcall(function()
+			DataManager:RecordGamble(s.player2, s.bet, (not p1Wins) and s.bet or 0, "CoinFlip")
+		end)
+	end
+
+	-- Send results
+	if s.player1 and s.player1.Parent then
+		ShowResult:FireClient(s.player1, tbl, p1Wins, s.bet)
+	end
+	if s.player2 and s.player2.Parent then
+		ShowResult:FireClient(s.player2, tbl, not p1Wins, s.bet)
+	end
+
+	task.wait(RESULT_TIME)
+	resetTable(tbl)
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- PROMPT WIRING
+-- ═══════════════════════════════════════════════════════════════════════════
+local function wireTable(tbl)
+	local seat1 = tbl:FindFirstChild("Seat1")
+	local seat2 = tbl:FindFirstChild("Seat2")
+	if not seat1 or not seat2 then return end
+
+	local pp1 = seat1:FindFirstChildOfClass("ProximityPrompt")
+	local pp2 = seat2:FindFirstChildOfClass("ProximityPrompt")
+	if not pp1 or not pp2 then return end
+
+	pp1.Triggered:Connect(function(plr)
+		local s = getState(tbl)
+		if s.phase ~= "empty" then return end
+
+		s.phase   = "picking_side"
+		s.player1 = plr
+		enablePrompt(seat1, false)
+
+		SeatPlayer:FireClient(plr, tbl, "Seat1")
+		ShowSidePicker:FireClient(plr, tbl)
+	end)
+
+	pp2.Triggered:Connect(function(plr)
+		local s = getState(tbl)
+		if s.phase ~= "waiting_opponent" then return end
+		if plr == s.player1 then return end
+
+		s.phase   = "waiting_confirm"
+		s.player2 = plr
+		enablePrompt(seat2, false)
+
+		local p2Side = (s.p1Side == "tung") and "trala" or "tung"
+		SeatPlayer:FireClient(plr, tbl, "Seat2")
+		ShowConfirmUI:FireClient(plr, tbl, s.player1.Name, s.bet, p2Side)
+	end)
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- CLIENT → SERVER HANDLERS
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- P1 picks a side ────────────────────────────────────────────────────────
+PickSide.OnServerEvent:Connect(function(plr, tbl, side)
+	if not tbl or not tbl.Parent then return end
+	local s = getState(tbl)
+	if s.phase ~= "picking_side" or s.player1 ~= plr then return end
+	if side ~= "tung" and side ~= "trala" then return end
+
+	s.p1Side = side
+	s.phase  = "waiting_bet"
+	ShowBetUI:FireClient(plr, tbl, MIN_BET, MAX_BET, side)
+end)
+
+-- P1 submits bet ─────────────────────────────────────────────────────────
+SubmitBet.OnServerEvent:Connect(function(plr, tbl, amount)
+	if not tbl or not tbl.Parent then return end
+	local s = getState(tbl)
+	if s.phase ~= "waiting_bet" or s.player1 ~= plr then return end
+
+	amount = math.floor(tonumber(amount) or 0)
+	if amount < MIN_BET or amount > MAX_BET then
+		warn("[CoinflipServer] Bet out of range:", amount)
+		return
+	end
+
+	local cash = getCash(plr)
+	if cash < amount then
+		warn("[CoinflipServer] Not enough cash:", plr.Name, "has", cash, "needs", amount)
+		return
+	end
+
+	s.bet   = amount
+	s.phase = "waiting_opponent"
+	enablePrompt(tbl:FindFirstChild("Seat2"), true)
+	ShowWaitUI:FireClient(plr, tbl, amount, HOUSE_FEE)
+end)
+
+-- P1 flips vs house ──────────────────────────────────────────────────────
+FlipVsHouse.OnServerEvent:Connect(function(plr, tbl)
+	if not tbl or not tbl.Parent then return end
+	local s = getState(tbl)
+	if s.phase ~= "waiting_opponent" or s.player1 ~= plr then return end
+
+	local fee = math.floor(s.bet * HOUSE_FEE)
+	local totalCost = s.bet + fee
+	if getCash(plr) < totalCost then
+		warn("[CoinflipServer] Not enough for house flip:", plr.Name)
+		return
+	end
+
+	-- Disable seat 2 — no opponent needed
+	enablePrompt(tbl:FindFirstChild("Seat2"), false)
+
+	-- Deduct bet + fee
+	addCash(plr, -totalCost)
+
+	task.spawn(function()
+		doFlip(tbl, s, plr.Name, "THE HOUSE")
+	end)
+end)
+
+-- P2 confirms ────────────────────────────────────────────────────────────
+ConfirmBet.OnServerEvent:Connect(function(plr, tbl)
+	if not tbl or not tbl.Parent then return end
+	local s = getState(tbl)
+	if s.phase ~= "waiting_confirm" or s.player2 ~= plr then return end
+
+	if getCash(s.player1) < s.bet or getCash(s.player2) < s.bet then
+		resetTable(tbl)
+		return
+	end
+
+	addCash(s.player1, -s.bet)
+	addCash(s.player2, -s.bet)
+
+	task.spawn(function()
+		doFlip(tbl, s, s.player1.Name, s.player2.Name)
+	end)
+end)
+
+-- P2 declines ────────────────────────────────────────────────────────────
+DeclineBet.OnServerEvent:Connect(function(plr, tbl)
+	if not tbl or not tbl.Parent then return end
+	local s = getState(tbl)
+	if s.player2 ~= plr then return end
+
+	pcall(function() UnseatPlayer:FireClient(plr, tbl) end)
+	pcall(function() HideAllUI:FireClient(plr) end)
+	s.player2 = nil
+	s.phase   = "waiting_opponent"
+	enablePrompt(tbl:FindFirstChild("Seat2"), true)
+end)
+
+-- Leave seat ─────────────────────────────────────────────────────────────
+LeaveSeat.OnServerEvent:Connect(function(plr, tbl)
+	if not tbl or not tbl.Parent then return end
+	local s = getState(tbl)
+	if s.phase == "flipping" or s.phase == "result" then return end
+
+	if s.player1 == plr then
+		resetTable(tbl)
+	elseif s.player2 == plr then
+		pcall(function() UnseatPlayer:FireClient(plr, tbl) end)
+		pcall(function() HideAllUI:FireClient(plr) end)
+		s.player2 = nil
+		s.phase   = "waiting_opponent"
+		enablePrompt(tbl:FindFirstChild("Seat2"), true)
+	end
+end)
+
+-- Player disconnect ──────────────────────────────────────────────────────
+Players.PlayerRemoving:Connect(function(plr)
+	for tbl, s in pairs(states) do
+		if s.player1 == plr or s.player2 == plr then
+			resetTable(tbl)
+		end
+	end
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- INIT
+-- ═══════════════════════════════════════════════════════════════════════════
+task.spawn(function()
+	local casino
+	for _ = 1, 60 do
+		casino = Workspace:FindFirstChild("TungTungCasino", true)
+		if casino then break end
+		task.wait(0.5)
+	end
+	if not casino then warn("[CoinflipServer] Casino model not found!") return end
+
+	local count = 0
+	for _, obj in ipairs(casino:GetDescendants()) do
+		if obj:IsA("Model") and obj.Name:match("^CoinflipTable_") then
+			wireTable(obj)
+			count += 1
+		end
+	end
+	print("[CoinflipServer] ✅ Wired " .. count .. " tables  |  Min $" .. MIN_BET .. " / Max $" .. MAX_BET)
+end)
