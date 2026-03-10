@@ -1,0 +1,163 @@
+# Hustle City - Game Improvement Roadmap
+
+## Visual Polish
+
+### City Lots
+- Replace blue lot plates with themed empty lots (dirt/concrete with "FOR SALE" signs, construction cones, caution tape)
+- Add a subtle glow or particle effect to purchasable lots so new players notice them
+- Show a ghost/transparent preview of the casino when a player walks onto an unowned lot
+
+### Lighting & Atmosphere
+- Add streetlights along every road with warm PointLights
+- Neon signs on the existing city buildings (barber shop, pawn shop, etc.)
+- Emissive/glowing windows on background buildings to make the city feel alive
+- Day/night cycle — city lights up at night, brainrots glow in the dark
+- Fog/atmosphere effects for depth (Roblox Atmosphere object)
+- Rain/weather system that cycles randomly
+
+### Casino Exterior
+- Each casino tier should look dramatically different from the outside so players can flex
+- Add animated signs, rotating lights, or particle effects to higher-tier casinos
+- Visible brainrot silhouettes through the glass walls so passersby can see your collection
+
+### City Environment
+- Background NPCs walking on sidewalks
+- Cars/vehicles driving on the roads
+- Trash cans, benches, fire hydrants, mailboxes — small props that make streets feel real
+- Animated billboards advertising player casinos or game features
+- A skybox with moving clouds and a proper horizon
+
+## Gameplay Systems
+
+### Rebirth / Prestige System
+- Reset cash and brainrots but earn a permanent income multiplier (1.5x, 2x, etc.)
+- Rebirth tiers with unique titles (Hustler -> Boss -> Kingpin -> Mogul -> Tycoon)
+- Each rebirth unlocks new cosmetic options (pedestal skins, casino themes, floor patterns)
+- Rebirth leaderboard displayed in the city center
+- This is the #1 retention mechanic in Roblox tycoons — keeps endgame players grinding
+
+### Rare Street Spawns
+- Random brainrot spawns on the street every few minutes
+- Server-wide announcement: "LEGENDARY Tung Tung just spawned near the fountain!"
+- Rarity tiers for street spawns (common/rare/epic/legendary/mythic)
+- Mythic spawns happen once per hour with a dramatic sound effect and beam of light
+- Players race to grab them — creates natural competition and excitement
+
+### Trading System
+- Player-to-player brainrot trading
+- Trade UI showing both players' offers side by side
+- Trade history log to prevent scam complaints
+- This alone drives massive engagement in collection games (see Pet Simulator, Adopt Me)
+
+### Quests / Missions
+- Daily quests: "Collect 5 brainrots", "Earn $10K in one session", "Visit 3 other casinos"
+- Weekly challenges with bigger rewards
+- Quest NPC in the city center that gives objectives
+- Completing quests gives exclusive brainrots, cash, or cosmetic rewards
+
+### Casino Visitors / Ratings
+- NPCs or other players can "visit" your casino
+- Casino gets a star rating based on brainrot value, decoration, and variety
+- Higher-rated casinos earn passive income even when offline
+- Leaderboard for top-rated casinos in the server
+
+### Gambling Mini-Games (Inside Casino)
+- Slot machine that costs cash, can win rare brainrots
+- Wheel spin with daily free spin + paid spins
+- Card flip memory game for bonus cash
+- These give players something to DO inside the casino besides placing brainrots
+
+### Pets / Companions
+- Small companion that follows the player around
+- Pets can auto-collect income tiles on the ground
+- Rare pets from eggs purchased with cash
+- Pet leveling system
+
+## Map & World
+
+### Central Hub / Plaza
+- Expand the fountain area into a proper town square
+- Giant golden brainrot statue in the center
+- NPC vendors around the plaza (quest giver, trader, shop)
+- Community board showing server stats, top players, recent rare catches
+
+### Neighborhoods / Zones
+- Starter zone with cheap lots
+- Downtown with medium lots
+- VIP/luxury district with expensive premium lots
+- Each zone has a different visual theme (suburban, urban, neon district)
+
+### Secret Areas
+- Hidden alleyways with rare brainrot spawns
+- Rooftop parkour course with a reward chest at the top
+- Underground sewer area with unique brainrot types
+- Discovering secrets gives badges
+
+### Player Housing
+- Apartment building where players can decorate a room
+- Display trophy brainrots on shelves
+- Visiting other players' apartments
+
+## Monetization (Robux)
+
+### Gamepasses
+- VIP Pass: 2x income, exclusive casino skin, VIP badge
+- Auto-Collect Pass: income tiles auto-collect without walking over them
+- Extra Slots Pass: +4 additional pedestal slots per casino tier
+- Lucky Pass: increased rare brainrot spawn chance
+
+### Cosmetic Shop
+- Pedestal skins (neon, gold, diamond, holographic)
+- Casino floor themes (lava, ice, space, underwater)
+- Custom casino wall colors/materials
+- Player trails and auras
+- Name tag styles and colors
+
+### Battle Pass / Season Pass
+- Monthly season with exclusive brainrots only available that season
+- Free track with basic rewards, premium track with exclusive cosmetics
+- Creates urgency and FOMO — huge driver of Robux spending on Roblox
+
+## Social & Retention
+
+### Daily Login Rewards
+- 7-day login calendar with escalating rewards
+- Day 7 gives an exclusive brainrot you can't get any other way
+- Monthly login streaks for ultra-rare rewards
+
+### Leaderboards
+- Richest players
+- Most brainrots collected
+- Highest casino rating
+- Most rebirths
+- Display boards in the city center
+
+### Codes System
+- Redeemable codes shared on social media (Twitter, Discord, YouTube)
+- Codes give free cash, rare brainrots, or cosmetics
+- Drives social media following and community growth
+
+### Friend Bonuses
+- Bonus income when playing with friends
+- "Invite a friend" reward system
+- Co-op casino ownership where friends can place brainrots in your casino
+
+### Badges & Achievements
+- "First Casino" badge
+- "Collect 10 Unique Brainrots" badge
+- "Reach $1M Cash" badge
+- "Find a Mythic Brainrot" badge
+- Badges displayed on player profile
+
+## Priority Implementation Order
+
+1. **Streetlights + city props** (quick visual win, makes the game look 10x better)
+2. **Rebirth system** (biggest retention impact, keeps endgame players)
+3. **Rare street spawns with announcements** (creates excitement and competition)
+4. **Daily login rewards** (brings players back every day)
+5. **Codes system** (drives social media growth)
+6. **Trading system** (massive engagement boost)
+7. **Day/night cycle** (visual wow factor)
+8. **Quests/missions** (gives players direction and goals)
+9. **Gamepass shop** (starts generating revenue)
+10. **Battle pass / seasons** (long-term monetization and retention)
