@@ -1,144 +1,232 @@
 -- ============================================================
 --  HUSTLE CITY: Casino Empire
 --  Script: Street Lights (Script in ServerScriptService)
---  Spawns streetlight models along any road parts in the city,
---  attaches warm PointLights, and runs a day/night cycle that
---  automatically dims / brightens the lights.
+--  Spawns streetlight models along road parts in the city,
+--  attaches warm PointLights, and runs a day/night cycle.
 -- ============================================================
 
-local Lighting   = game:GetService("Lighting")
-local RunService = game:GetService("RunService")
+local Lighting     = game:GetService("Lighting")
 local TweenService = game:GetService("TweenService")
+local CollectionService = game:GetService("CollectionService")
 
 -- ============================================================
 -- CONFIG
 -- ============================================================
 
 local CONFIG = {
-	-- How far apart each streetlight is placed along a road, in studs
+	-- ── Placement ───────────────────────────────────────────
+	-- Studs between each streetlight along a road
 	SPACING = 20,
 
-	-- How far off the road centre-line the pole is offset (so it sits on the kerb)
+	-- Studs off the road centre-line (kerb offset)
 	SIDE_OFFSET = 8,
 
-	-- Place lights on BOTH sides of every road segment?
+	-- Place lights on both sides of every road segment?
 	BOTH_SIDES = true,
 
-	-- Pole dimensions
-	POLE_HEIGHT     = 12,
-	POLE_THICKNESS  = 0.4,
-	ARM_LENGTH      = 2.5,
+	-- ── Pole / Lamp Dimensions ──────────────────────────────
+	POLE_HEIGHT    = 12,
+	POLE_THICKNESS = 0.4,
+	ARM_LENGTH     = 2.5,
+	LAMP_SIZE      = Vector3.new(1.2, 0.5, 1.2),
 
-	-- Lamp head size
-	LAMP_SIZE = Vector3.new(1.2, 0.5, 1.2),
-
-	-- Warm sodium-vapour yellow colour
+	-- ── Light Properties ────────────────────────────────────
+	-- Warm sodium-vapour yellow
 	LIGHT_COLOR      = Color3.fromRGB(255, 200, 100),
 	LIGHT_BRIGHTNESS = 2.5,
 	LIGHT_RANGE      = 30,
 
-	-- Day/night: Lighting.ClockTime at which lights turn ON and OFF
-	LIGHTS_ON_TIME  = 18,   -- 6 pm
+	-- ── Day / Night ─────────────────────────────────────────
+	LIGHTS_ON_TIME  = 18,   -- 6 pm  (Lighting.ClockTime)
 	LIGHTS_OFF_TIME = 7,    -- 7 am
+	FADE_TIME       = 3,    -- seconds to fade on/off
+	ALWAYS_ON       = false, -- set true to skip day/night during testing
 
-	-- How long (seconds) the lights take to fade on/off
-	FADE_TIME = 3,
+	-- ── Road Detection – Strategy 1: Name Patterns ──────────
+	-- Parts whose name contains ANY of these strings (case-insensitive)
+	-- are treated as roads.
+	ROAD_NAME_PATTERNS = {
+		"road", "street", "avenue", "blvd", "lane", "path",
+		"sidewalk", "pavement", "asphalt", "tarmac", "highway",
+	},
 
-	-- Folder/model names used to identify road parts in the workspace
-	-- Any Part whose name contains one of these strings (case-insensitive) is treated as a road
-	ROAD_NAME_PATTERNS = { "road", "street", "avenue", "blvd", "sidewalk_road" },
+	-- ── Road Detection – Strategy 2: CollectionService Tag ──
+	-- Parts tagged with this tag in the Tag Editor are treated as roads.
+	ROAD_TAG = "Road",
 
-	-- Folder to place generated light models under (created if missing)
+	-- ── Road Detection – Strategy 3: Shape Heuristic ────────
+	-- A part is treated as a road if it passes ALL these checks:
+	--   • is a BasePart (not Terrain)
+	--   • height (Y size) ≤ ROAD_MAX_HEIGHT
+	--   • longest horizontal dimension ≥ ROAD_MIN_LENGTH
+	--   • is NOT excluded by SHAPE_EXCLUDE_NAMES
+	SHAPE_DETECT         = true,   -- set false to disable shape heuristic
+	ROAD_MAX_HEIGHT      = 1.5,    -- studs; road slabs are typically 0.2–1
+	ROAD_MIN_LENGTH      = 20,     -- studs; road segment must be at least this long
+	ROAD_MIN_WIDTH       = 8,      -- studs; road segment must be at least this wide
+	SHAPE_EXCLUDE_NAMES  = {       -- never treat these as roads even if they match
+		"baseplate", "ground", "floor", "terrain",
+		"wall", "ceiling", "roof", "stair", "step",
+		"lot", "plot", "casino", "building",
+	},
+
+	-- ── Output Folder ───────────────────────────────────────
 	LIGHTS_FOLDER_NAME = "StreetLights",
 
-	-- Set to true to skip the day/night clock and keep lights always on
-	ALWAYS_ON = false,
+	-- ── Debug ───────────────────────────────────────────────
+	-- When true, prints every workspace BasePart that was considered
+	-- but did not match so you can figure out the correct names.
+	DEBUG_MODE = false,
 }
 
 -- ============================================================
--- HELPERS
+-- ROAD DETECTION
 -- ============================================================
 
-local function isRoadPart(part)
-	if not part:IsA("BasePart") then return false end
-	local lower = part.Name:lower()
-	for _, pattern in ipairs(CONFIG.ROAD_NAME_PATTERNS) do
-		if lower:find(pattern, 1, true) then
-			return true
-		end
+local function nameContains(name, patterns)
+	local lower = name:lower()
+	for _, p in ipairs(patterns) do
+		if lower:find(p, 1, true) then return true end
 	end
 	return false
 end
 
--- Returns all BaseParts in the workspace tree that look like roads
+local function isExcluded(name)
+	return nameContains(name, CONFIG.SHAPE_EXCLUDE_NAMES)
+end
+
+-- Returns true if the part looks like a road by its physical shape
+local function isRoadByShape(part)
+	if not CONFIG.SHAPE_DETECT then return false end
+	if not part:IsA("BasePart")  then return false end
+	if isExcluded(part.Name)     then return false end
+
+	local s = part.Size
+	local minH = math.min(s.X, s.Y, s.Z)
+	local maxH = math.max(s.X, s.Y, s.Z)
+	local midH = s.X + s.Y + s.Z - minH - maxH  -- middle dimension
+
+	-- Y (vertical) must be small → it's a flat slab
+	if s.Y > CONFIG.ROAD_MAX_HEIGHT then return false end
+	-- longest horizontal span must be road-sized
+	if math.max(s.X, s.Z) < CONFIG.ROAD_MIN_LENGTH then return false end
+	-- width (short horizontal span) must be at least road-width
+	if math.min(s.X, s.Z) < CONFIG.ROAD_MIN_WIDTH  then return false end
+
+	return true
+end
+
+-- Returns true if the part matches by name pattern
+local function isRoadByName(part)
+	if not part:IsA("BasePart") then return false end
+	return nameContains(part.Name, CONFIG.ROAD_NAME_PATTERNS)
+end
+
+-- Returns true if the part is tagged as a road
+local function isRoadByTag(part)
+	return CollectionService:HasTag(part, CONFIG.ROAD_TAG)
+end
+
+-- Scan the entire workspace and collect road parts using all three strategies
 local function collectRoadParts()
+	local seen  = {}   -- deduplicate
 	local roads = {}
+
+	local byName  = 0
+	local byTag   = 0
+	local byShape = 0
+	local skipped = {}
+
+	local function consider(part)
+		if seen[part] then return end
+		if not part:IsA("BasePart") then return end
+		seen[part] = true
+
+		if isRoadByName(part) then
+			table.insert(roads, part)
+			byName += 1
+		elseif isRoadByTag(part) then
+			table.insert(roads, part)
+			byTag += 1
+		elseif isRoadByShape(part) then
+			table.insert(roads, part)
+			byShape += 1
+		elseif CONFIG.DEBUG_MODE then
+			table.insert(skipped, string.format(
+				"  SKIP  %-40s  size=(%.0f, %.1f, %.0f)",
+				part:GetFullName(), part.Size.X, part.Size.Y, part.Size.Z
+			))
+		end
+	end
+
 	local function scan(obj)
+		consider(obj)
 		for _, child in ipairs(obj:GetChildren()) do
-			if isRoadPart(child) then
-				table.insert(roads, child)
-			end
 			scan(child)
 		end
 	end
 	scan(workspace)
+
+	if CONFIG.DEBUG_MODE and #skipped > 0 then
+		print("[StreetLights] DEBUG – non-road BaseParts:")
+		for _, s in ipairs(skipped) do print(s) end
+	end
+
+	print(string.format(
+		"[StreetLights] Found %d road part(s)  (by name: %d | by tag: %d | by shape: %d)",
+		#roads, byName, byTag, byShape
+	))
 	return roads
 end
 
--- Given a road part, return a list of world-space CFrames where poles should stand.
--- Poles are placed every CONFIG.SPACING studs along the longest axis of the part,
--- offset CONFIG.SIDE_OFFSET studs to one (or both) sides.
+-- ============================================================
+-- POLE POSITION CALCULATOR
+-- ============================================================
+
 local function polePositionsForRoad(roadPart)
 	local positions = {}
-	local size  = roadPart.Size
-	local cf    = roadPart.CFrame
-	local sizeX = size.X
-	local sizeZ = size.Z
+	local size = roadPart.Size
+	local cf   = roadPart.CFrame
 
-	-- Determine the "length" axis (longest horizontal dimension)
-	local alongAxis, perpAxis
-	if sizeX >= sizeZ then
-		alongAxis = Vector3.new(1, 0, 0)
-		perpAxis  = Vector3.new(0, 0, 1)
+	-- The "length" axis is whichever horizontal span is larger
+	local alongLocal, perpLocal
+	if size.X >= size.Z then
+		alongLocal = Vector3.new(1, 0, 0)
+		perpLocal  = Vector3.new(0, 0, 1)
 	else
-		alongAxis = Vector3.new(0, 0, 1)
-		perpAxis  = Vector3.new(1, 0, 0)
+		alongLocal = Vector3.new(0, 0, 1)
+		perpLocal  = Vector3.new(1, 0, 0)
 	end
 
-	local halfLen = math.max(sizeX, sizeZ) / 2
-	local steps   = math.floor((halfLen * 2) / CONFIG.SPACING)
-	if steps < 1 then steps = 1 end
+	local halfLen  = math.max(size.X, size.Z) / 2
+	local steps    = math.max(1, math.floor((halfLen * 2) / CONFIG.SPACING))
+	local surfaceY = cf.Position.Y + size.Y / 2
+
+	local sides = { CONFIG.SIDE_OFFSET }
+	if CONFIG.BOTH_SIDES then sides = { CONFIG.SIDE_OFFSET, -CONFIG.SIDE_OFFSET } end
 
 	for i = 0, steps - 1 do
 		local t = -halfLen + (i + 0.5) * CONFIG.SPACING
-		-- surface Y: top of the road part
-		local surfaceY = (cf.Position.Y) + (size.Y / 2)
-
-		local sides = { CONFIG.SIDE_OFFSET }
-		if CONFIG.BOTH_SIDES then
-			sides = { CONFIG.SIDE_OFFSET, -CONFIG.SIDE_OFFSET }
-		end
-
 		for _, sideSign in ipairs(sides) do
-			local worldPos = cf:PointToWorldSpace(
-				alongAxis * t + perpAxis * sideSign + Vector3.new(0, 0, 0)
-			)
+			local localOffset = alongLocal * t + perpLocal * sideSign
+			local worldPos    = cf:PointToWorldSpace(localOffset)
 			worldPos = Vector3.new(worldPos.X, surfaceY, worldPos.Z)
-			table.insert(positions, { pos = worldPos, forward = cf:VectorToWorldSpace(alongAxis) })
+			local worldForward = cf:VectorToWorldSpace(perpLocal * sideSign).Unit
+			table.insert(positions, { pos = worldPos, forward = worldForward })
 		end
 	end
 	return positions
 end
 
 -- ============================================================
--- BUILD A SINGLE STREETLIGHT MODEL
+-- BUILD A SINGLE STREETLIGHT
 -- ============================================================
 
 local function buildStreetlight(parent, pos, forwardDir)
 	local model = Instance.new("Model")
-	model.Name = "Streetlight"
+	model.Name  = "Streetlight"
 
-	-- ── Pole ──────────────────────────────────────────────────
+	-- Pole
 	local pole = Instance.new("Part")
 	pole.Name       = "Pole"
 	pole.Anchored   = true
@@ -149,36 +237,30 @@ local function buildStreetlight(parent, pos, forwardDir)
 	pole.Color      = Color3.fromRGB(60, 60, 65)
 	pole.Parent     = model
 
-	-- ── Arm (horizontal bracket at top) ──────────────────────
+	-- Arm bracket
 	local arm = Instance.new("Part")
 	arm.Name       = "Arm"
 	arm.Anchored   = true
 	arm.CanCollide = false
 	arm.Size       = Vector3.new(CONFIG.ARM_LENGTH, CONFIG.POLE_THICKNESS, CONFIG.POLE_THICKNESS)
-	-- offset the arm in the forwardDir so it hangs over the road
-	local armCF = CFrame.new(
-		pos + Vector3.new(0, CONFIG.POLE_HEIGHT, 0) + forwardDir * (CONFIG.ARM_LENGTH / 2)
-	)
-	arm.CFrame    = armCF
-	arm.Material  = Enum.Material.Metal
-	arm.Color     = Color3.fromRGB(60, 60, 65)
-	arm.Parent    = model
+	arm.CFrame     = CFrame.new(pos + Vector3.new(0, CONFIG.POLE_HEIGHT, 0) + forwardDir * (CONFIG.ARM_LENGTH / 2))
+	arm.Material   = Enum.Material.Metal
+	arm.Color      = Color3.fromRGB(60, 60, 65)
+	arm.Parent     = model
 
-	-- ── Lamp Head ─────────────────────────────────────────────
+	-- Lamp head
 	local lamp = Instance.new("Part")
 	lamp.Name       = "LampHead"
 	lamp.Anchored   = true
 	lamp.CanCollide = false
 	lamp.Size       = CONFIG.LAMP_SIZE
-	lamp.CFrame     = CFrame.new(
-		pos + Vector3.new(0, CONFIG.POLE_HEIGHT - 0.25, 0) + forwardDir * CONFIG.ARM_LENGTH
-	)
+	lamp.CFrame     = CFrame.new(pos + Vector3.new(0, CONFIG.POLE_HEIGHT - 0.25, 0) + forwardDir * CONFIG.ARM_LENGTH)
 	lamp.Material   = Enum.Material.SmoothPlastic
 	lamp.Color      = Color3.fromRGB(220, 220, 200)
 	lamp.Parent     = model
 	model.PrimaryPart = lamp
 
-	-- ── Emissive glow surface on the underside ────────────────
+	-- Downward surface glow (pool of light on road)
 	local surf = Instance.new("SurfaceLight", lamp)
 	surf.Name       = "SurfaceGlow"
 	surf.Face       = Enum.NormalId.Bottom
@@ -188,7 +270,7 @@ local function buildStreetlight(parent, pos, forwardDir)
 	surf.Angle      = 80
 	surf.Shadows    = true
 
-	-- ── Point Light for wide radius illumination ──────────────
+	-- Wide-radius point light
 	local pt = Instance.new("PointLight", lamp)
 	pt.Name       = "Glow"
 	pt.Color      = CONFIG.LIGHT_COLOR
@@ -205,21 +287,24 @@ end
 -- ============================================================
 
 local function spawnStreetlights()
-	-- Get or create container folder
 	local container = workspace:FindFirstChild(CONFIG.LIGHTS_FOLDER_NAME)
-	if container then container:Destroy() end   -- rebuild fresh
+	if container then container:Destroy() end
 	container = Instance.new("Folder")
 	container.Name   = CONFIG.LIGHTS_FOLDER_NAME
 	container.Parent = workspace
 
 	local roads = collectRoadParts()
+
 	if #roads == 0 then
-		warn("[StreetLights] No road parts found! " ..
-			"Name your road Parts 'Road', 'Street', etc. to auto-place streetlights.")
+		warn("[StreetLights] No road parts detected.\n" ..
+			"Fix options (pick ONE):\n" ..
+			"  1. Rename road parts so the name contains 'Road', 'Street', etc.\n" ..
+			"  2. Tag road parts with the Tag Editor using the tag '" .. CONFIG.ROAD_TAG .. "'.\n" ..
+			"  3. Set DEBUG_MODE = true in the CONFIG to list all workspace parts\n" ..
+			"     so you can see exactly what they are named."
+		)
 		return {}
 	end
-
-	print(string.format("[StreetLights] Found %d road part(s), placing lights…", #roads))
 
 	local allLights = {}
 	for _, road in ipairs(roads) do
@@ -234,67 +319,52 @@ local function spawnStreetlights()
 end
 
 -- ============================================================
--- DAY / NIGHT CYCLE CONTROLLER
+-- DAY / NIGHT CYCLE
 -- ============================================================
 
--- Returns true if lights should currently be on based on clock time
 local function lightsOnNow()
 	if CONFIG.ALWAYS_ON then return true end
-	local t = Lighting.ClockTime  -- 0 – 24
+	local t = Lighting.ClockTime
 	if CONFIG.LIGHTS_ON_TIME > CONFIG.LIGHTS_OFF_TIME then
-		-- Spans midnight  (e.g. on=18, off=7)
 		return t >= CONFIG.LIGHTS_ON_TIME or t < CONFIG.LIGHTS_OFF_TIME
 	else
 		return t >= CONFIG.LIGHTS_ON_TIME and t < CONFIG.LIGHTS_OFF_TIME
 	end
 end
 
-local function setLightState(lightEntry, on)
+local function setLightState(entry, on)
 	local brightness = on and CONFIG.LIGHT_BRIGHTNESS or 0
-	local tweenInfo   = TweenInfo.new(CONFIG.FADE_TIME, Enum.EasingStyle.Quad)
-
-	-- Tween PointLight
-	TweenService:Create(lightEntry.pointLight,  tweenInfo, { Brightness = brightness }):Play()
-	-- Tween SurfaceLight
-	TweenService:Create(lightEntry.surfaceLight, tweenInfo, { Brightness = brightness }):Play()
-
-	-- Tween lamp head emissive colour
-	local lampColor = on and CONFIG.LIGHT_COLOR or Color3.fromRGB(150, 150, 140)
-	TweenService:Create(lightEntry.lamp, tweenInfo, { Color = lampColor }):Play()
+	local info = TweenInfo.new(CONFIG.FADE_TIME, Enum.EasingStyle.Quad)
+	TweenService:Create(entry.pointLight,  info, { Brightness = brightness }):Play()
+	TweenService:Create(entry.surfaceLight, info, { Brightness = brightness }):Play()
+	local col = on and CONFIG.LIGHT_COLOR or Color3.fromRGB(150, 150, 140)
+	TweenService:Create(entry.lamp, info, { Color = col }):Play()
 end
 
-local function applyDayNightToAll(lights, on)
-	for _, entry in ipairs(lights) do
-		setLightState(entry, on)
-	end
+local function applyToAll(lights, on)
+	for _, e in ipairs(lights) do setLightState(e, on) end
 end
 
 -- ============================================================
 -- MAIN
 -- ============================================================
 
--- Wait for workspace to be ready
-local function main()
-	-- Small delay to let the map load
-	task.wait(3)
+task.spawn(function()
+	task.wait(3)   -- let the map finish loading
 
 	local allLights = spawnStreetlights()
 	if #allLights == 0 then return end
 
-	-- Set initial state
 	local currentlyOn = lightsOnNow()
-	applyDayNightToAll(allLights, currentlyOn)
+	applyToAll(allLights, currentlyOn)
 
-	-- Poll every 5 seconds – cheap and reliable on Roblox servers
 	while task.wait(5) do
 		local shouldBeOn = lightsOnNow()
 		if shouldBeOn ~= currentlyOn then
 			currentlyOn = shouldBeOn
-			applyDayNightToAll(allLights, currentlyOn)
-			print(string.format("[StreetLights] Lights %s (ClockTime = %.1f)",
+			applyToAll(allLights, currentlyOn)
+			print(string.format("[StreetLights] Lights %s (ClockTime=%.1f)",
 				currentlyOn and "ON" or "OFF", Lighting.ClockTime))
 		end
 	end
-end
-
-task.spawn(main)
+end)
